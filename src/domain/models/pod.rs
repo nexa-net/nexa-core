@@ -27,6 +27,7 @@ pub enum PodStatus {
     Stopped,
     Failed,
     Restarting,
+    CrashLoopBackoff,
 }
 
 impl Pod {
@@ -70,6 +71,7 @@ impl std::fmt::Display for PodStatus {
             PodStatus::Stopped => write!(f, "Stopped"),
             PodStatus::Failed => write!(f, "Failed"),
             PodStatus::Restarting => write!(f, "Restarting"),
+            PodStatus::CrashLoopBackoff => write!(f, "CrashLoopBackoff"),
         }
     }
 }
@@ -86,6 +88,7 @@ impl std::str::FromStr for PodStatus {
             "stopped" => Ok(PodStatus::Stopped),
             "failed" => Ok(PodStatus::Failed),
             "restarting" => Ok(PodStatus::Restarting),
+            "crashloopbackoff" => Ok(PodStatus::CrashLoopBackoff),
             other => Err(format!("unknown pod status: {other}")),
         }
     }

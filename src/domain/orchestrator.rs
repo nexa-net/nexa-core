@@ -60,6 +60,13 @@ pub enum Command {
     GetHealthProbeTargets {
         reply: oneshot::Sender<Vec<(Uuid, PodHealthConfig)>>,
     },
+    ContainerExited {
+        pod_id: Uuid,
+        exit_code: i64,
+    },
+    RestartPod {
+        pod_id: Uuid,
+    },
 }
 
 #[derive(Clone)]
@@ -155,6 +162,14 @@ impl OrchestratorHandle {
         let _ = self.tx.send(Command::GetHealthProbeTargets { reply }).await;
         rx.await.unwrap_or_default()
     }
+
+    pub async fn send_container_exited(&self, pod_id: Uuid, exit_code: i64) {
+        let _ = self.tx.send(Command::ContainerExited { pod_id, exit_code }).await;
+    }
+
+    pub fn command_sender(&self) -> mpsc::Sender<Command> {
+        self.tx.clone()
+    }
 }
 
 pub struct Orchestrator {
@@ -229,6 +244,12 @@ impl Orchestrator {
                 Command::GetHealthProbeTargets { reply } => {
                     let targets = self.handle_get_health_probe_targets();
                     let _ = reply.send(targets);
+                }
+                Command::ContainerExited { pod_id, exit_code } => {
+                    let _ = (pod_id, exit_code);
+                }
+                Command::RestartPod { pod_id } => {
+                    let _ = pod_id;
                 }
             }
         }
