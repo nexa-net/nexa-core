@@ -16,7 +16,7 @@ pub struct DeploymentSpec {
     #[serde(default)]
     pub env: HashMap<String, String>,
     #[serde(default)]
-    pub volumes: Vec<VolumeMount>,
+    pub volumes: Vec<VolumeSpec>,
     #[serde(default)]
     pub secrets: Vec<String>,
     pub network: Option<NetworkConfig>,
@@ -36,9 +36,47 @@ pub struct DeploymentMeta {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VolumeMount {
+#[serde(untagged)]
+pub enum VolumeSpec {
+    Named(NamedVolume),
+    Bind(BindMount),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamedVolume {
     pub name: String,
-    pub mount_path: String,
+    pub mount: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BindMount {
+    pub path: String,
+    pub mount: String,
+    #[serde(default)]
+    pub readonly: bool,
+}
+
+impl VolumeSpec {
+    pub fn mount_point(&self) -> &str {
+        match self {
+            VolumeSpec::Named(v) => &v.mount,
+            VolumeSpec::Bind(v) => &v.mount,
+        }
+    }
+
+    pub fn source_name(&self) -> &str {
+        match self {
+            VolumeSpec::Named(v) => &v.name,
+            VolumeSpec::Bind(v) => &v.path,
+        }
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        match self {
+            VolumeSpec::Named(_) => false,
+            VolumeSpec::Bind(v) => v.readonly,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

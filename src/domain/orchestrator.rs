@@ -430,9 +430,9 @@ impl Orchestrator {
                 .volumes
                 .iter()
                 .map(|v| crate::ports::runtime::VolumeBinding {
-                    source: v.name.clone(),
-                    target: v.mount_path.clone(),
-                    read_only: false,
+                    source: v.source_name().to_string(),
+                    target: v.mount_point().to_string(),
+                    read_only: v.is_read_only(),
                 })
                 .collect(),
             labels,

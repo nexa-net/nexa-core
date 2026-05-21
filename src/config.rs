@@ -167,4 +167,76 @@ image: nginx:latest
         let spec = parse_deployment(yaml).unwrap();
         assert!(spec.resources.is_none());
     }
+
+    #[test]
+    fn parse_named_volume() {
+        let yaml = r#"
+project: myapp
+deployment:
+  name: api
+image: nginx:latest
+volumes:
+  - name: data
+    mount: /app/data
+"#;
+        let spec = parse_deployment(yaml).unwrap();
+        assert_eq!(spec.volumes.len(), 1);
+        assert_eq!(spec.volumes[0].mount_point(), "/app/data");
+        assert_eq!(spec.volumes[0].source_name(), "data");
+        assert!(!spec.volumes[0].is_read_only());
+    }
+
+    #[test]
+    fn parse_bind_mount_volume() {
+        let yaml = r#"
+project: myapp
+deployment:
+  name: api
+image: nginx:latest
+volumes:
+  - path: /host/uploads
+    mount: /app/uploads
+    readonly: true
+"#;
+        let spec = parse_deployment(yaml).unwrap();
+        assert_eq!(spec.volumes.len(), 1);
+        assert_eq!(spec.volumes[0].mount_point(), "/app/uploads");
+        assert_eq!(spec.volumes[0].source_name(), "/host/uploads");
+        assert!(spec.volumes[0].is_read_only());
+    }
+
+    #[test]
+    fn parse_mixed_volumes() {
+        let yaml = r#"
+project: myapp
+deployment:
+  name: api
+image: nginx:latest
+volumes:
+  - name: data
+    mount: /app/data
+  - path: /host/uploads
+    mount: /app/uploads
+    readonly: true
+"#;
+        let spec = parse_deployment(yaml).unwrap();
+        assert_eq!(spec.volumes.len(), 2);
+        assert_eq!(spec.volumes[0].source_name(), "data");
+        assert_eq!(spec.volumes[1].source_name(), "/host/uploads");
+    }
+
+    #[test]
+    fn parse_bind_mount_readonly_defaults_false() {
+        let yaml = r#"
+project: myapp
+deployment:
+  name: api
+image: nginx:latest
+volumes:
+  - path: /host/data
+    mount: /app/data
+"#;
+        let spec = parse_deployment(yaml).unwrap();
+        assert!(!spec.volumes[0].is_read_only());
+    }
 }
