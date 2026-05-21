@@ -1,0 +1,21 @@
+[package]
+name = "nexa-core"
+description = "Core types, traits, and abstractions for NexaNet"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/nexa-net/nexa-core"
+rust-version = "1.85"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+tracing = "0.1"
+bollard = "0.18"
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
