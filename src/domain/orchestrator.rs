@@ -8,6 +8,7 @@ use crate::domain::models::*;
 use crate::domain::health::{HealthTracker, HealthState, PodHealthConfig};
 use crate::domain::restart::{self, RestartState};
 use crate::error::{NexaError, Result};
+use crate::ports::cluster::ClusterTransport;
 use crate::ports::runtime::{ContainerConfig, ContainerRuntime, LogStream};
 use crate::ports::secrets::SecretStore;
 use crate::ports::state::StateStore;
@@ -265,6 +266,7 @@ pub struct Orchestrator {
     runtime: Arc<dyn ContainerRuntime>,
     state_store: Option<Arc<dyn StateStore>>,
     secret_store: Option<Arc<dyn SecretStore>>,
+    transport: Option<Arc<dyn ClusterTransport>>,
     health_tracker: HealthTracker,
     projects: StdHashMap<String, Project>,
     deployments: StdHashMap<Uuid, Deployment>,
@@ -278,6 +280,7 @@ impl Orchestrator {
         runtime: Arc<dyn ContainerRuntime>,
         state_store: Option<Arc<dyn StateStore>>,
         secret_store: Option<Arc<dyn SecretStore>>,
+        transport: Option<Arc<dyn ClusterTransport>>,
     ) -> OrchestratorHandle {
         let (tx, rx) = mpsc::channel(256);
         let tx_clone = tx.clone();
@@ -286,6 +289,7 @@ impl Orchestrator {
                 runtime,
                 state_store,
                 secret_store,
+                transport,
                 health_tracker: HealthTracker::new(),
                 projects: StdHashMap::new(),
                 deployments: StdHashMap::new(),
@@ -716,6 +720,24 @@ impl Orchestrator {
         Ok(resolved)
     }
 
+    async fn select_node(&self) -> Option<Uuid> {
+        let state = self.state_store.as_ref()?;
+        let nodes = state.list_nodes().await.ok()?;
+        // Skip if no nodes or only master node registered — this is single-node mode
+        let workers: Vec<&Node> = nodes
+            .iter()
+            .filter(|n| n.status == NodeStatus::Ready && n.role == NodeRole::Worker)
+            .collect();
+        if workers.is_empty() {
+            return None;
+        }
+        // Simple strategy: pick the ready worker with the most available memory
+        workers
+            .iter()
+            .max_by_key(|n| n.resources.memory_available)
+            .map(|n| n.id)
+    }
+
     async fn create_pod(&mut self, deployment_id: Uuid, spec: &DeploymentSpec, index: u32) -> Result<()> {
         let mut pod = Pod::new(
             deployment_id,
@@ -737,51 +759,75 @@ impl Orchestrator {
             final_env.extend(resolved);
         }
 
-        let _ = self.runtime.pull_image(&spec.image).await;
+        // Try to schedule on a remote node if transport is available
+        let target_node = self.select_node().await;
 
-        if self.runtime.container_exists(&container_name).await? {
-            let _ = self.runtime.stop_container(&container_name, 5).await;
-            let _ = self.runtime.remove_container(&container_name, true).await;
-        }
+        if let (Some(transport), Some(node_id)) = (&self.transport, target_node) {
+            // Multi-node path: delegate to transport
+            pod.node_id = Some(node_id);
 
-        let config = self.build_container_config(spec, pod.id, &container_name, &network_name, &final_env);
+            // Create a modified spec with resolved secrets in env
+            let mut resolved_spec = spec.clone();
+            resolved_spec.env = final_env;
 
-        match self.runtime.create_container(&config).await {
-            Ok(container_id) => {
-                self.runtime.start_container(&container_id).await?;
-                pod.container_id = Some(container_id.clone());
-                pod.status = PodStatus::Running;
-
-                // Populate container IP for health checking
-                match self.runtime.container_ip(&container_id, &network_name).await {
-                    Ok(ip) => pod.container_ip = Some(ip),
-                    Err(e) => tracing::warn!(error = %e, "failed to get container IP"),
+            match transport.assign_pod(&node_id, &pod, &resolved_spec).await {
+                Ok(()) => {
+                    pod.status = PodStatus::Running;
+                }
+                Err(e) => {
+                    tracing::error!(name = container_name, error = %e, "failed to assign pod to node");
+                    pod.status = PodStatus::Failed;
                 }
             }
-            Err(_) => {
-                pod.status = PodStatus::Failed;
+        } else {
+            // Single-node path: use runtime directly
+            let _ = self.runtime.pull_image(&spec.image).await;
+
+            if self.runtime.container_exists(&container_name).await? {
+                let _ = self.runtime.stop_container(&container_name, 5).await;
+                let _ = self.runtime.remove_container(&container_name, true).await;
+            }
+
+            let config = self.build_container_config(spec, pod.id, &container_name, &network_name, &final_env);
+
+            match self.runtime.create_container(&config).await {
+                Ok(container_id) => {
+                    self.runtime.start_container(&container_id).await?;
+                    pod.container_id = Some(container_id.clone());
+                    pod.status = PodStatus::Running;
+
+                    match self.runtime.container_ip(&container_id, &network_name).await {
+                        Ok(ip) => pod.container_ip = Some(ip),
+                        Err(e) => tracing::warn!(error = %e, "failed to get container IP"),
+                    }
+                }
+                Err(_) => {
+                    pod.status = PodStatus::Failed;
+                }
             }
         }
 
         self.persist_insert_pod(&pod).await;
 
-        // Register for health checking if configured
-        if let (Some(hc), Some(ip)) = (&spec.healthcheck, &pod.container_ip) {
-            if let Some(&port) = spec.ports.first() {
-                let interval = crate::duration::parse_duration(&hc.interval)
-                    .unwrap_or(std::time::Duration::from_secs(10));
-                let timeout = crate::duration::parse_duration(&hc.timeout)
-                    .unwrap_or(std::time::Duration::from_secs(5));
+        // Register for health checking only for local pods
+        if target_node.is_none() {
+            if let (Some(hc), Some(ip)) = (&spec.healthcheck, &pod.container_ip) {
+                if let Some(&port) = spec.ports.first() {
+                    let interval = crate::duration::parse_duration(&hc.interval)
+                        .unwrap_or(std::time::Duration::from_secs(10));
+                    let timeout = crate::duration::parse_duration(&hc.timeout)
+                        .unwrap_or(std::time::Duration::from_secs(5));
 
-                self.health_tracker.register(PodHealthConfig {
-                    pod_id: pod.id,
-                    container_ip: ip.clone(),
-                    port,
-                    path: hc.path.clone(),
-                    interval,
-                    timeout,
-                    retries: hc.retries,
-                });
+                    self.health_tracker.register(PodHealthConfig {
+                        pod_id: pod.id,
+                        container_ip: ip.clone(),
+                        port,
+                        path: hc.path.clone(),
+                        interval,
+                        timeout,
+                        retries: hc.retries,
+                    });
+                }
             }
         }
 
@@ -1358,12 +1404,12 @@ mod tests {
     }
 
     fn spawn_test_orchestrator() -> OrchestratorHandle {
-        Orchestrator::spawn(Arc::new(MockRuntime), None, None)
+        Orchestrator::spawn(Arc::new(MockRuntime), None, None, None)
     }
 
     fn spawn_persisted_test_orchestrator() -> (OrchestratorHandle, Arc<InMemoryStore>) {
         let store = Arc::new(InMemoryStore::new());
-        let handle = Orchestrator::spawn(Arc::new(MockRuntime), Some(store.clone() as Arc<dyn StateStore>), None);
+        let handle = Orchestrator::spawn(Arc::new(MockRuntime), Some(store.clone() as Arc<dyn StateStore>), None, None);
         (handle, store)
     }
 
@@ -1544,7 +1590,7 @@ mod tests {
         let runtime = Arc::new(CapturingRuntime {
             configs: Mutex::new(Vec::new()),
         });
-        let handle = Orchestrator::spawn(runtime.clone(), None, None);
+        let handle = Orchestrator::spawn(runtime.clone(), None, None, None);
 
         let spec = DeploymentSpec {
             project: "test".into(),
@@ -1706,7 +1752,7 @@ mod tests {
         pod.container_id = Some("old-container-123".into());
         store.insert_pod(&pod).await.unwrap();
 
-        let handle = Orchestrator::spawn(Arc::new(MockRuntime), Some(store.clone() as Arc<dyn StateStore>), None);
+        let handle = Orchestrator::spawn(Arc::new(MockRuntime), Some(store.clone() as Arc<dyn StateStore>), None, None);
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         let projects = handle.list_projects().await;
@@ -1874,7 +1920,7 @@ mod tests {
 
         // ConfigurableMockRuntime has no knowledge of "vanished-container"
         let runtime = Arc::new(ConfigurableMockRuntime::new());
-        let handle = Orchestrator::spawn(runtime, Some(store.clone() as Arc<dyn StateStore>), None);
+        let handle = Orchestrator::spawn(runtime, Some(store.clone() as Arc<dyn StateStore>), None, None);
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         let pods = handle.list_pods(None).await;
@@ -2230,6 +2276,7 @@ mod tests {
             capturing.clone(),
             None,
             Some(secrets as Arc<dyn SecretStore>),
+            None,
         );
 
         let spec = DeploymentSpec {
@@ -2265,6 +2312,7 @@ mod tests {
             Arc::new(MockRuntime),
             None,
             Some(secrets as Arc<dyn SecretStore>),
+            None,
         );
 
         let spec = DeploymentSpec {
