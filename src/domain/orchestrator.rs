@@ -6,8 +6,9 @@ use uuid::Uuid;
 
 use crate::domain::models::*;
 use crate::domain::health::{HealthTracker, HealthState, PodHealthConfig};
+use crate::domain::restart::{self, RestartState};
 use crate::error::{NexaError, Result};
-use crate::ports::runtime::{ContainerConfig, ContainerRuntime, EventStream, LogStream};
+use crate::ports::runtime::{ContainerConfig, ContainerRuntime, LogStream};
 use crate::ports::state::StateStore;
 use crate::ports::runtime::ContainerState;
 
@@ -179,6 +180,8 @@ pub struct Orchestrator {
     projects: StdHashMap<String, Project>,
     deployments: StdHashMap<Uuid, Deployment>,
     pods: StdHashMap<Uuid, Pod>,
+    restart_states: StdHashMap<Uuid, RestartState>,
+    tx: mpsc::Sender<Command>,
 }
 
 impl Orchestrator {
@@ -187,6 +190,7 @@ impl Orchestrator {
         state_store: Option<Arc<dyn StateStore>>,
     ) -> OrchestratorHandle {
         let (tx, rx) = mpsc::channel(256);
+        let tx_clone = tx.clone();
         tokio::spawn(async move {
             let mut orch = Self {
                 runtime,
@@ -195,6 +199,8 @@ impl Orchestrator {
                 projects: StdHashMap::new(),
                 deployments: StdHashMap::new(),
                 pods: StdHashMap::new(),
+                restart_states: StdHashMap::new(),
+                tx: tx_clone,
             };
             orch.run(rx).await;
         });
@@ -246,10 +252,10 @@ impl Orchestrator {
                     let _ = reply.send(targets);
                 }
                 Command::ContainerExited { pod_id, exit_code } => {
-                    let _ = (pod_id, exit_code);
+                    self.handle_container_exited(pod_id, exit_code).await;
                 }
                 Command::RestartPod { pod_id } => {
-                    let _ = pod_id;
+                    self.handle_restart_pod(pod_id).await;
                 }
             }
         }
@@ -641,6 +647,25 @@ impl Orchestrator {
     }
 
     async fn handle_health_report(&mut self, pod_id: Uuid, healthy: bool) {
+        let now = chrono::Utc::now();
+
+        // Track restart state alongside health tracker
+        if healthy {
+            if let Some(state) = self.restart_states.get_mut(&pod_id) {
+                state.mark_healthy(now);
+                state.reset_if_healthy(now);
+                // Sync restart_count to pod
+                let count = state.count;
+                if let Some(p) = self.pods.get_mut(&pod_id) {
+                    p.restart_count = count;
+                }
+            }
+        } else {
+            if let Some(state) = self.restart_states.get_mut(&pod_id) {
+                state.mark_unhealthy();
+            }
+        }
+
         let result = self.health_tracker.record_result(&pod_id, healthy);
         match result {
             Some((HealthState::Unhealthy, true)) => {
@@ -667,6 +692,210 @@ impl Orchestrator {
             }
         }
         targets
+    }
+
+    async fn handle_container_exited(&mut self, pod_id: Uuid, exit_code: i64) {
+        // Look up the pod
+        let pod = match self.pods.get(&pod_id) {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let deployment_id = pod.deployment_id;
+
+        // Find deployment's restart policy
+        let policy = match self.deployments.get(&deployment_id) {
+            Some(d) => d.spec.restart.clone(),
+            None => return,
+        };
+
+        // Check if restart is allowed by policy
+        if !restart::should_restart(&policy, exit_code) {
+            if let Some(p) = self.pods.get_mut(&pod_id) {
+                p.status = PodStatus::Failed;
+                let cloned = p.clone();
+                self.persist_update_pod(&cloned).await;
+            }
+            self.update_deployment_status(deployment_id);
+            if let Some(d) = self.deployments.get(&deployment_id) {
+                let cloned = d.clone();
+                self.persist_update_deployment(&cloned).await;
+            }
+            return;
+        }
+
+        // Get or create restart state
+        let state = self.restart_states
+            .entry(pod_id)
+            .or_insert_with(RestartState::new);
+
+        // If already in crash loop, mark CrashLoopBackoff and return
+        if state.is_crash_loop() {
+            if let Some(p) = self.pods.get_mut(&pod_id) {
+                p.status = PodStatus::CrashLoopBackoff;
+                let cloned = p.clone();
+                self.persist_update_pod(&cloned).await;
+            }
+            self.update_deployment_status(deployment_id);
+            if let Some(d) = self.deployments.get(&deployment_id) {
+                let cloned = d.clone();
+                self.persist_update_deployment(&cloned).await;
+            }
+            return;
+        }
+
+        // Record restart and check if we've hit crash loop
+        let now = chrono::Utc::now();
+        state.record_restart(now);
+
+        if state.is_crash_loop() {
+            if let Some(p) = self.pods.get_mut(&pod_id) {
+                p.status = PodStatus::CrashLoopBackoff;
+                let cloned = p.clone();
+                self.persist_update_pod(&cloned).await;
+            }
+            self.update_deployment_status(deployment_id);
+            if let Some(d) = self.deployments.get(&deployment_id) {
+                let cloned = d.clone();
+                self.persist_update_deployment(&cloned).await;
+            }
+            return;
+        }
+
+        // Mark pod as Restarting, update restart_count
+        let restart_count = state.count;
+        if let Some(p) = self.pods.get_mut(&pod_id) {
+            p.status = PodStatus::Restarting;
+            p.restart_count = restart_count;
+            let cloned = p.clone();
+            self.persist_update_pod(&cloned).await;
+        }
+
+        // Calculate backoff delay and schedule RestartPod
+        let delay = restart::backoff_delay(restart_count.saturating_sub(1));
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = tx.send(Command::RestartPod { pod_id }).await;
+        });
+    }
+
+    async fn handle_restart_pod(&mut self, pod_id: Uuid) {
+        // Look up pod, skip if already CrashLoopBackoff or Failed
+        let pod = match self.pods.get(&pod_id) {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        match pod.status {
+            PodStatus::CrashLoopBackoff | PodStatus::Failed => return,
+            _ => {}
+        }
+        let deployment_id = pod.deployment_id;
+
+        // Remove old container (stop + remove)
+        if let Some(cid) = &pod.container_id {
+            let _ = self.runtime.stop_container(cid, 10).await;
+            let _ = self.runtime.remove_container(cid, true).await;
+        }
+
+        // Get deployment spec
+        let spec = match self.deployments.get(&deployment_id) {
+            Some(d) => d.spec.clone(),
+            None => return,
+        };
+
+        // Recreate container in-place (same pod, new container)
+        let container_name = pod.container_name();
+        let network_name = format!("nexa-{}", spec.project);
+
+        let _ = self.runtime.pull_image(&spec.image).await;
+
+        if let Ok(true) = self.runtime.container_exists(&container_name).await {
+            let _ = self.runtime.stop_container(&container_name, 5).await;
+            let _ = self.runtime.remove_container(&container_name, true).await;
+        }
+
+        let ports: Vec<crate::ports::runtime::PortBinding> = spec
+            .ports
+            .iter()
+            .map(|&p| crate::ports::runtime::PortBinding {
+                container_port: p,
+                host_port: if spec.replicas == 1 { Some(p) } else { None },
+            })
+            .collect();
+
+        let mut labels = StdHashMap::new();
+        labels.insert("managed-by".to_string(), "nexanet".to_string());
+        labels.insert("nexa.project".to_string(), spec.project.clone());
+        labels.insert("nexa.deployment".to_string(), spec.deployment.name.clone());
+        labels.insert("nexa.pod-id".to_string(), pod_id.to_string());
+
+        let config = ContainerConfig {
+            name: container_name,
+            image: spec.image.clone(),
+            env: spec.env.clone(),
+            ports,
+            volumes: spec
+                .volumes
+                .iter()
+                .map(|v| crate::ports::runtime::VolumeBinding {
+                    source: v.source_name().to_string(),
+                    target: v.mount_point().to_string(),
+                    read_only: v.is_read_only(),
+                })
+                .collect(),
+            labels,
+            network: Some(network_name.clone()),
+        };
+
+        match self.runtime.create_container(&config).await {
+            Ok(container_id) => {
+                if let Err(e) = self.runtime.start_container(&container_id).await {
+                    tracing::error!(pod_id = %pod_id, error = %e, "failed to start restarted container");
+                    if let Some(p) = self.pods.get_mut(&pod_id) {
+                        p.status = PodStatus::Failed;
+                        let cloned = p.clone();
+                        self.persist_update_pod(&cloned).await;
+                    }
+                } else {
+                    let container_ip = match self.runtime.container_ip(&container_id, &network_name).await {
+                        Ok(ip) => Some(ip),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to get container IP for restarted pod");
+                            None
+                        }
+                    };
+
+                    if let Some(p) = self.pods.get_mut(&pod_id) {
+                        p.container_id = Some(container_id);
+                        p.status = PodStatus::Running;
+                        p.container_ip = container_ip;
+                        let cloned = p.clone();
+                        self.persist_update_pod(&cloned).await;
+                    }
+
+                    // Mark healthy in restart state
+                    let now = chrono::Utc::now();
+                    if let Some(state) = self.restart_states.get_mut(&pod_id) {
+                        state.mark_healthy(now);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(pod_id = %pod_id, error = %e, "failed to create restarted container");
+                if let Some(p) = self.pods.get_mut(&pod_id) {
+                    p.status = PodStatus::Failed;
+                    let cloned = p.clone();
+                    self.persist_update_pod(&cloned).await;
+                }
+            }
+        }
+
+        // Update deployment status
+        self.update_deployment_status(deployment_id);
+        if let Some(d) = self.deployments.get(&deployment_id) {
+            let cloned = d.clone();
+            self.persist_update_deployment(&cloned).await;
+        }
     }
 
     async fn restart_pod(&mut self, pod_id: Uuid) -> Result<()> {
@@ -1388,5 +1617,152 @@ mod tests {
         let deployments = handle.list_deployments(None).await;
         assert_eq!(deployments.len(), 1);
         assert_eq!(deployments[0].status, DeploymentStatus::Degraded);
+    }
+
+    // ---- Restart policy tests (Task 5) ----
+
+    #[tokio::test]
+    async fn container_exited_with_always_policy_triggers_restart() {
+        let handle = spawn_test_orchestrator();
+
+        let spec = DeploymentSpec {
+            project: "test".into(),
+            deployment: DeploymentMeta { name: "api".into() },
+            replicas: 1,
+            image: "nginx".into(),
+            ports: vec![],
+            env: HashMap::new(),
+            volumes: vec![],
+            secrets: vec![],
+            network: None,
+            healthcheck: None,
+            restart: RestartPolicy::Always,
+            resources: None,
+        };
+
+        handle.deploy(spec).await.unwrap();
+        let pods = handle.list_pods(None).await;
+        let pod_id = pods[0].id;
+
+        // Send container exited event
+        handle.send_container_exited(pod_id, 1).await;
+
+        // Wait for the actor to process + backoff (1s for first restart) + processing
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Pod should be in Restarting state
+        let pods = handle.list_pods(None).await;
+        assert_eq!(pods.len(), 1);
+        assert_eq!(pods[0].status, PodStatus::Restarting);
+        assert_eq!(pods[0].restart_count, 1);
+
+        // Wait for the backoff to complete and RestartPod to be processed
+        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+        let pods = handle.list_pods(None).await;
+        assert_eq!(pods.len(), 1);
+        assert_eq!(pods[0].status, PodStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn container_exited_with_never_policy_marks_failed() {
+        let handle = spawn_test_orchestrator();
+
+        let spec = DeploymentSpec {
+            project: "test".into(),
+            deployment: DeploymentMeta { name: "api".into() },
+            replicas: 1,
+            image: "nginx".into(),
+            ports: vec![],
+            env: HashMap::new(),
+            volumes: vec![],
+            secrets: vec![],
+            network: None,
+            healthcheck: None,
+            restart: RestartPolicy::Never,
+            resources: None,
+        };
+
+        handle.deploy(spec).await.unwrap();
+        let pods = handle.list_pods(None).await;
+        let pod_id = pods[0].id;
+
+        handle.send_container_exited(pod_id, 1).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let pods = handle.list_pods(None).await;
+        assert_eq!(pods.len(), 1);
+        assert_eq!(pods[0].status, PodStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn on_failure_policy_does_not_restart_on_clean_exit() {
+        let handle = spawn_test_orchestrator();
+
+        let spec = DeploymentSpec {
+            project: "test".into(),
+            deployment: DeploymentMeta { name: "api".into() },
+            replicas: 1,
+            image: "nginx".into(),
+            ports: vec![],
+            env: HashMap::new(),
+            volumes: vec![],
+            secrets: vec![],
+            network: None,
+            healthcheck: None,
+            restart: RestartPolicy::OnFailure,
+            resources: None,
+        };
+
+        handle.deploy(spec).await.unwrap();
+        let pods = handle.list_pods(None).await;
+        let pod_id = pods[0].id;
+
+        // Exit code 0 means clean exit — should not restart
+        handle.send_container_exited(pod_id, 0).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let pods = handle.list_pods(None).await;
+        assert_eq!(pods.len(), 1);
+        assert_eq!(pods[0].status, PodStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn crash_loop_backoff_after_ten_restarts() {
+        let handle = spawn_test_orchestrator();
+
+        let spec = DeploymentSpec {
+            project: "test".into(),
+            deployment: DeploymentMeta { name: "api".into() },
+            replicas: 1,
+            image: "nginx".into(),
+            ports: vec![],
+            env: HashMap::new(),
+            volumes: vec![],
+            secrets: vec![],
+            network: None,
+            healthcheck: None,
+            restart: RestartPolicy::Always,
+            resources: None,
+        };
+
+        handle.deploy(spec).await.unwrap();
+        let pods = handle.list_pods(None).await;
+        let pod_id = pods[0].id;
+
+        // Send 10 ContainerExited events rapidly.
+        // Each one increments the restart counter. On the 10th,
+        // is_crash_loop() returns true and the handler marks CrashLoopBackoff
+        // BEFORE scheduling a restart.
+        for _ in 0..10 {
+            handle.send_container_exited(pod_id, 1).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let pods = handle.list_pods(None).await;
+        assert_eq!(pods.len(), 1);
+        assert_eq!(pods[0].status, PodStatus::CrashLoopBackoff);
     }
 }
