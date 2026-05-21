@@ -10,6 +10,7 @@ pub struct Pod {
     pub deployment_name: String,
     pub replica_index: u32,
     pub container_id: Option<String>,
+    pub container_ip: Option<String>,
     pub status: PodStatus,
     pub image: String,
     pub restart_count: u32,
@@ -43,6 +44,7 @@ impl Pod {
             deployment_name: deployment_name.to_string(),
             replica_index,
             container_id: None,
+            container_ip: None,
             status: PodStatus::Pending,
             image: image.to_string(),
             restart_count: 0,
@@ -103,5 +105,20 @@ mod tests {
             "nginx:latest",
         );
         assert_eq!(pod.restart_count, 0);
+    }
+
+    #[test]
+    fn pod_container_ip_defaults_to_none() {
+        let pod = Pod::new(Uuid::new_v4(), "proj", "deploy", 0, "nginx:latest");
+        assert!(pod.container_ip.is_none());
+    }
+
+    #[test]
+    fn pod_serialization_roundtrip_with_ip() {
+        let mut pod = Pod::new(Uuid::new_v4(), "proj", "deploy", 0, "nginx:latest");
+        pod.container_ip = Some("172.17.0.2".to_string());
+        let json = serde_json::to_string(&pod).unwrap();
+        let deserialized: Pod = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.container_ip.as_deref(), Some("172.17.0.2"));
     }
 }

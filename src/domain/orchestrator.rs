@@ -656,6 +656,7 @@ mod tests {
         async fn create_network(&self, _name: &str) -> Result<String> { Ok("net-id".into()) }
         async fn remove_network(&self, _name: &str) -> Result<()> { Ok(()) }
         async fn connect_to_network(&self, _id: &str, _net: &str) -> Result<()> { Ok(()) }
+        async fn container_ip(&self, _container_id: &str, _network: &str) -> Result<String> { Ok("172.17.0.2".to_string()) }
     }
 
     struct ConfigurableMockRuntime {
@@ -691,6 +692,7 @@ mod tests {
         async fn create_network(&self, _: &str) -> Result<String> { Ok("net-id".into()) }
         async fn remove_network(&self, _: &str) -> Result<()> { Ok(()) }
         async fn connect_to_network(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
+        async fn container_ip(&self, _container_id: &str, _network: &str) -> Result<String> { Ok("172.17.0.2".to_string()) }
     }
 
     fn spawn_test_orchestrator() -> OrchestratorHandle {
@@ -871,6 +873,7 @@ mod tests {
             async fn create_network(&self, _name: &str) -> Result<String> { Ok("net-id".into()) }
             async fn remove_network(&self, _name: &str) -> Result<()> { Ok(()) }
             async fn connect_to_network(&self, _id: &str, _net: &str) -> Result<()> { Ok(()) }
+            async fn container_ip(&self, _container_id: &str, _network: &str) -> Result<String> { Ok("172.17.0.2".to_string()) }
         }
 
         let runtime = Arc::new(CapturingRuntime {

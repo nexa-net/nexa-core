@@ -67,4 +67,5 @@ pub trait ContainerRuntime: Send + Sync {
     async fn create_network(&self, name: &str) -> Result<String>;
     async fn remove_network(&self, name: &str) -> Result<()>;
     async fn connect_to_network(&self, container_id: &str, network: &str) -> Result<()>;
+    async fn container_ip(&self, container_id: &str, network: &str) -> Result<String>;
 }
