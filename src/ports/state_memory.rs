@@ -12,6 +12,8 @@ pub struct InMemoryStore {
     projects: Mutex<HashMap<String, Project>>,
     deployments: Mutex<HashMap<Uuid, Deployment>>,
     pods: Mutex<HashMap<Uuid, Pod>>,
+    nodes: Mutex<HashMap<Uuid, Node>>,
+    cluster_config: Mutex<HashMap<String, String>>,
 }
 
 impl InMemoryStore {
@@ -20,6 +22,8 @@ impl InMemoryStore {
             projects: Mutex::new(HashMap::new()),
             deployments: Mutex::new(HashMap::new()),
             pods: Mutex::new(HashMap::new()),
+            nodes: Mutex::new(HashMap::new()),
+            cluster_config: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -145,6 +149,59 @@ impl StateStore for InMemoryStore {
             .collect();
         Ok(result)
     }
+
+    async fn insert_node(&self, node: &Node) -> Result<()> {
+        let mut map = self.nodes.lock().unwrap();
+        if map.values().any(|n| n.name == node.name) {
+            return Err(NexaError::InvalidSpec(format!(
+                "node '{}' already exists",
+                node.name
+            )));
+        }
+        map.insert(node.id, node.clone());
+        Ok(())
+    }
+
+    async fn get_node(&self, id: &Uuid) -> Result<Option<Node>> {
+        let map = self.nodes.lock().unwrap();
+        Ok(map.get(id).cloned())
+    }
+
+    async fn get_node_by_name(&self, name: &str) -> Result<Option<Node>> {
+        let map = self.nodes.lock().unwrap();
+        Ok(map.values().find(|n| n.name == name).cloned())
+    }
+
+    async fn list_nodes(&self) -> Result<Vec<Node>> {
+        let map = self.nodes.lock().unwrap();
+        Ok(map.values().cloned().collect())
+    }
+
+    async fn update_node(&self, node: &Node) -> Result<()> {
+        let mut map = self.nodes.lock().unwrap();
+        if !map.contains_key(&node.id) {
+            return Err(NexaError::NodeNotFound(node.id.to_string()));
+        }
+        map.insert(node.id, node.clone());
+        Ok(())
+    }
+
+    async fn delete_node(&self, id: &Uuid) -> Result<()> {
+        let mut map = self.nodes.lock().unwrap();
+        map.remove(id);
+        Ok(())
+    }
+
+    async fn get_cluster_config(&self, key: &str) -> Result<Option<String>> {
+        let map = self.cluster_config.lock().unwrap();
+        Ok(map.get(key).cloned())
+    }
+
+    async fn set_cluster_config(&self, key: &str, value: &str) -> Result<()> {
+        let mut map = self.cluster_config.lock().unwrap();
+        map.insert(key.to_string(), value.to_string());
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -247,5 +304,123 @@ mod tests {
 
         let all = store.list_pods(None).await.unwrap();
         assert_eq!(all.len(), 0);
+    }
+
+    fn sample_resources() -> NodeResources {
+        NodeResources {
+            cpu_cores: 4.0,
+            memory_bytes: 8_589_934_592,
+            cpu_available: 3.5,
+            memory_available: 7_000_000_000,
+            running_pods: 2,
+        }
+    }
+
+    #[tokio::test]
+    async fn insert_and_get_node() {
+        let store = InMemoryStore::new();
+        let node = Node::new(
+            "worker-1".into(),
+            "192.168.1.1:9000".into(),
+            NodeRole::Worker,
+            sample_resources(),
+        );
+        let node_id = node.id;
+
+        store.insert_node(&node).await.unwrap();
+        let fetched = store.get_node(&node_id).await.unwrap();
+
+        assert!(fetched.is_some());
+        let n = fetched.unwrap();
+        assert_eq!(n.name, "worker-1");
+        assert_eq!(n.address, "192.168.1.1:9000");
+        assert_eq!(n.role, NodeRole::Worker);
+    }
+
+    #[tokio::test]
+    async fn get_node_by_name() {
+        let store = InMemoryStore::new();
+        let node = Node::new(
+            "master-1".into(),
+            "10.0.0.1:9000".into(),
+            NodeRole::Master,
+            sample_resources(),
+        );
+        store.insert_node(&node).await.unwrap();
+
+        let fetched = store.get_node_by_name("master-1").await.unwrap();
+        assert!(fetched.is_some());
+        assert_eq!(fetched.unwrap().id, node.id);
+
+        let missing = store.get_node_by_name("nonexistent").await.unwrap();
+        assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_nodes() {
+        let store = InMemoryStore::new();
+        let n1 = Node::new("w1".into(), "10.0.0.1:9000".into(), NodeRole::Worker, sample_resources());
+        let n2 = Node::new("w2".into(), "10.0.0.2:9000".into(), NodeRole::Worker, sample_resources());
+
+        store.insert_node(&n1).await.unwrap();
+        store.insert_node(&n2).await.unwrap();
+
+        let all = store.list_nodes().await.unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn update_node() {
+        let store = InMemoryStore::new();
+        let mut node = Node::new(
+            "worker-1".into(),
+            "10.0.0.1:9000".into(),
+            NodeRole::Worker,
+            sample_resources(),
+        );
+        store.insert_node(&node).await.unwrap();
+
+        node.status = NodeStatus::Draining;
+        store.update_node(&node).await.unwrap();
+
+        let fetched = store.get_node(&node.id).await.unwrap().unwrap();
+        assert_eq!(fetched.status, NodeStatus::Draining);
+
+        // Updating a non-existent node should error
+        let phantom = Node::new("ghost".into(), "0.0.0.0:0".into(), NodeRole::Worker, sample_resources());
+        let result = store.update_node(&phantom).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_node() {
+        let store = InMemoryStore::new();
+        let node = Node::new("w1".into(), "10.0.0.1:9000".into(), NodeRole::Worker, sample_resources());
+        let node_id = node.id;
+
+        store.insert_node(&node).await.unwrap();
+        store.delete_node(&node_id).await.unwrap();
+
+        let fetched = store.get_node(&node_id).await.unwrap();
+        assert!(fetched.is_none());
+    }
+
+    #[tokio::test]
+    async fn cluster_config_roundtrip() {
+        let store = InMemoryStore::new();
+
+        // Initially empty
+        let val = store.get_cluster_config("leader_id").await.unwrap();
+        assert!(val.is_none());
+
+        // Set and get
+        store.set_cluster_config("leader_id", "node-abc").await.unwrap();
+        let val = store.get_cluster_config("leader_id").await.unwrap();
+        assert_eq!(val.as_deref(), Some("node-abc"));
+
+        // Overwrite
+        store.set_cluster_config("leader_id", "node-xyz").await.unwrap();
+        let val = store.get_cluster_config("leader_id").await.unwrap();
+        assert_eq!(val.as_deref(), Some("node-xyz"));
     }
 }

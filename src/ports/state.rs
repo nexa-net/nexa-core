@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::domain::models::{
-    Deployment, Pod, Project, ProjectStatus,
+    Deployment, Node, Pod, Project, ProjectStatus,
 };
 use crate::error::Result;
 
@@ -25,4 +25,16 @@ pub trait StateStore: Send + Sync {
     async fn update_pod(&self, pod: &Pod) -> Result<()>;
     async fn delete_pod(&self, id: &Uuid) -> Result<()>;
     async fn pods_by_deployment(&self, deployment_id: &Uuid) -> Result<Vec<Pod>>;
+
+    // Node operations
+    async fn insert_node(&self, node: &Node) -> Result<()>;
+    async fn get_node(&self, id: &Uuid) -> Result<Option<Node>>;
+    async fn get_node_by_name(&self, name: &str) -> Result<Option<Node>>;
+    async fn list_nodes(&self) -> Result<Vec<Node>>;
+    async fn update_node(&self, node: &Node) -> Result<()>;
+    async fn delete_node(&self, id: &Uuid) -> Result<()>;
+
+    // Cluster config (key-value)
+    async fn get_cluster_config(&self, key: &str) -> Result<Option<String>>;
+    async fn set_cluster_config(&self, key: &str, value: &str) -> Result<()>;
 }

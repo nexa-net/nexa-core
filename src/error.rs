@@ -11,6 +11,9 @@ pub enum NexaError {
     #[error("pod not found: {0}")]
     PodNotFound(String),
 
+    #[error("node not found: {0}")]
+    NodeNotFound(String),
+
     #[error("container runtime error: {0}")]
     Runtime(String),
 

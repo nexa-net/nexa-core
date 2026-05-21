@@ -83,6 +83,31 @@ impl fmt::Display for NodeStatus {
     }
 }
 
+impl std::str::FromStr for NodeRole {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "Master" => Ok(NodeRole::Master),
+            "Worker" => Ok(NodeRole::Worker),
+            other => Err(format!("unknown node role: {other}")),
+        }
+    }
+}
+
+impl std::str::FromStr for NodeStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "Ready" => Ok(NodeStatus::Ready),
+            "NotReady" => Ok(NodeStatus::NotReady),
+            "Draining" => Ok(NodeStatus::Draining),
+            other => Err(format!("unknown node status: {other}")),
+        }
+    }
+}
+
 impl NodeResources {
     pub fn zero() -> Self {
         Self {
