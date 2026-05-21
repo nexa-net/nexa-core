@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::domain::models::*;
+use crate::domain::health::{HealthTracker, HealthState, PodHealthConfig};
 use crate::error::{NexaError, Result};
 use crate::ports::runtime::{ContainerConfig, ContainerRuntime, LogStream};
 use crate::ports::state::StateStore;
@@ -51,6 +52,13 @@ pub enum Command {
         name: String,
         tail: Option<u64>,
         reply: oneshot::Sender<Result<LogStream>>,
+    },
+    HealthReport {
+        pod_id: Uuid,
+        healthy: bool,
+    },
+    GetHealthProbeTargets {
+        reply: oneshot::Sender<Vec<(Uuid, PodHealthConfig)>>,
     },
 }
 
@@ -137,11 +145,22 @@ impl OrchestratorHandle {
         rx.await
             .map_err(|_| NexaError::Runtime("orchestrator dropped reply".into()))?
     }
+
+    pub async fn report_health(&self, pod_id: Uuid, healthy: bool) {
+        let _ = self.tx.send(Command::HealthReport { pod_id, healthy }).await;
+    }
+
+    pub async fn get_health_probe_targets(&self) -> Vec<(Uuid, PodHealthConfig)> {
+        let (reply, rx) = oneshot::channel();
+        let _ = self.tx.send(Command::GetHealthProbeTargets { reply }).await;
+        rx.await.unwrap_or_default()
+    }
 }
 
 pub struct Orchestrator {
     runtime: Arc<dyn ContainerRuntime>,
     state_store: Option<Arc<dyn StateStore>>,
+    health_tracker: HealthTracker,
     projects: StdHashMap<String, Project>,
     deployments: StdHashMap<Uuid, Deployment>,
     pods: StdHashMap<Uuid, Pod>,
@@ -157,6 +176,7 @@ impl Orchestrator {
             let mut orch = Self {
                 runtime,
                 state_store,
+                health_tracker: HealthTracker::new(),
                 projects: StdHashMap::new(),
                 deployments: StdHashMap::new(),
                 pods: StdHashMap::new(),
@@ -202,6 +222,13 @@ impl Orchestrator {
                 Command::PodLogs { project, name, tail, reply } => {
                     let result = self.handle_pod_logs(&project, &name, tail).await;
                     let _ = reply.send(result);
+                }
+                Command::HealthReport { pod_id, healthy } => {
+                    self.handle_health_report(pod_id, healthy).await;
+                }
+                Command::GetHealthProbeTargets { reply } => {
+                    let targets = self.handle_get_health_probe_targets();
+                    let _ = reply.send(targets);
                 }
             }
         }
@@ -372,6 +399,7 @@ impl Orchestrator {
             .collect();
 
         for pod_id in &pod_ids {
+            self.health_tracker.unregister(pod_id);
             if let Some(pod) = self.pods.get(pod_id) {
                 if let Some(cid) = &pod.container_id {
                     let _ = self.runtime.stop_container(cid, 10).await;
@@ -455,6 +483,7 @@ impl Orchestrator {
         } else if current_count > desired {
             current_pods.sort();
             for &pod_id in &current_pods[(desired as usize)..] {
+                self.health_tracker.unregister(&pod_id);
                 if let Some(pod) = self.pods.get(&pod_id) {
                     if let Some(cid) = &pod.container_id {
                         let _ = self.runtime.stop_container(cid, 10).await;
@@ -544,14 +573,20 @@ impl Orchestrator {
                 })
                 .collect(),
             labels,
-            network: Some(network_name),
+            network: Some(network_name.clone()),
         };
 
         match self.runtime.create_container(&config).await {
             Ok(container_id) => {
                 self.runtime.start_container(&container_id).await?;
-                pod.container_id = Some(container_id);
+                pod.container_id = Some(container_id.clone());
                 pod.status = PodStatus::Running;
+
+                // Populate container IP for health checking
+                match self.runtime.container_ip(&container_id, &network_name).await {
+                    Ok(ip) => pod.container_ip = Some(ip),
+                    Err(e) => tracing::warn!(error = %e, "failed to get container IP"),
+                }
             }
             Err(_) => {
                 pod.status = PodStatus::Failed;
@@ -559,8 +594,112 @@ impl Orchestrator {
         }
 
         self.persist_insert_pod(&pod).await;
+
+        // Register for health checking if configured
+        if let (Some(hc), Some(ip)) = (&spec.healthcheck, &pod.container_ip) {
+            if let Some(&port) = spec.ports.first() {
+                let interval = crate::duration::parse_duration(&hc.interval)
+                    .unwrap_or(std::time::Duration::from_secs(10));
+                let timeout = crate::duration::parse_duration(&hc.timeout)
+                    .unwrap_or(std::time::Duration::from_secs(5));
+
+                self.health_tracker.register(PodHealthConfig {
+                    pod_id: pod.id,
+                    container_ip: ip.clone(),
+                    port,
+                    path: hc.path.clone(),
+                    interval,
+                    timeout,
+                    retries: hc.retries,
+                });
+            }
+        }
+
         self.pods.insert(pod.id, pod);
         Ok(())
+    }
+
+    async fn handle_health_report(&mut self, pod_id: Uuid, healthy: bool) {
+        let result = self.health_tracker.record_result(&pod_id, healthy);
+        match result {
+            Some((HealthState::Unhealthy, true)) => {
+                tracing::info!(pod_id = %pod_id, "pod unhealthy, triggering restart");
+                if let Err(e) = self.restart_pod(pod_id).await {
+                    tracing::error!(pod_id = %pod_id, error = %e, "failed to restart unhealthy pod");
+                }
+            }
+            Some((HealthState::Failing { consecutive_failures }, _)) => {
+                tracing::warn!(pod_id = %pod_id, failures = consecutive_failures, "pod health check failing");
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_get_health_probe_targets(&mut self) -> Vec<(Uuid, PodHealthConfig)> {
+        let due_ids = self.health_tracker.pods_due_for_probe();
+        let mut targets = Vec::new();
+        for pod_id in due_ids {
+            if let Some(config) = self.health_tracker.config(&pod_id) {
+                let config = config.clone();
+                self.health_tracker.mark_probed(&pod_id);
+                targets.push((pod_id, config));
+            }
+        }
+        targets
+    }
+
+    async fn restart_pod(&mut self, pod_id: Uuid) -> Result<()> {
+        let pod = self.pods.get(&pod_id)
+            .ok_or_else(|| NexaError::PodNotFound(pod_id.to_string()))?;
+        let deployment_id = pod.deployment_id;
+        let replica_index = pod.replica_index;
+
+        // Stop old container
+        if let Some(cid) = &pod.container_id {
+            let _ = self.runtime.stop_container(cid, 10).await;
+            let _ = self.runtime.remove_container(cid, true).await;
+        }
+
+        // Remove old pod
+        self.health_tracker.unregister(&pod_id);
+        self.persist_delete_pod(&pod_id).await;
+        self.pods.remove(&pod_id);
+
+        // Get deployment spec
+        let spec = self.deployments.get(&deployment_id)
+            .ok_or_else(|| NexaError::DeploymentNotFound(deployment_id.to_string()))?
+            .spec.clone();
+
+        // Create replacement pod
+        self.create_pod(deployment_id, &spec, replica_index).await?;
+
+        // Update deployment status
+        self.update_deployment_status(deployment_id);
+
+        Ok(())
+    }
+
+    fn update_deployment_status(&mut self, deployment_id: Uuid) {
+        let desired = match self.deployments.get(&deployment_id) {
+            Some(d) => d.spec.replicas,
+            None => return,
+        };
+        let (all_running, any_failed) = self.pods.values()
+            .filter(|p| p.deployment_id == deployment_id)
+            .fold((true, false), |(all_r, any_f), p| match p.status {
+                PodStatus::Running => (all_r, any_f),
+                PodStatus::Failed => (false, true),
+                _ => (false, any_f),
+            });
+        if let Some(d) = self.deployments.get_mut(&deployment_id) {
+            d.status = if all_running && desired > 0 {
+                DeploymentStatus::Running
+            } else if any_failed {
+                DeploymentStatus::Degraded
+            } else {
+                DeploymentStatus::Pending
+            };
+        }
     }
 
     fn find_deployment_id(&self, project: &str, name: &str) -> Option<Uuid> {
@@ -1050,6 +1189,130 @@ mod tests {
         let deployments = handle.list_deployments(Some("loaded".into())).await;
         assert_eq!(deployments.len(), 1);
         assert_eq!(deployments[0].name(), "web");
+    }
+
+    // ---- Task 9 tests (health checking) ----
+
+    #[tokio::test]
+    async fn health_report_tracks_failures() {
+        let handle = spawn_test_orchestrator();
+
+        let spec = DeploymentSpec {
+            project: "test".into(),
+            deployment: DeploymentMeta { name: "api".into() },
+            replicas: 1,
+            image: "nginx".into(),
+            ports: vec![3000],
+            env: HashMap::new(),
+            volumes: vec![],
+            secrets: vec![],
+            network: None,
+            healthcheck: Some(HealthCheck {
+                path: "/health".into(),
+                interval: "10s".into(),
+                timeout: "5s".into(),
+                retries: 3,
+            }),
+            restart: RestartPolicy::default(),
+            resources: None,
+        };
+
+        handle.deploy(spec).await.unwrap();
+        let pods = handle.list_pods(None).await;
+        let pod_id = pods[0].id;
+
+        // Report a failure
+        handle.report_health(pod_id, false).await;
+
+        // Small delay for the actor to process
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Pod should still be running (only 1 failure, retries=3)
+        let pods = handle.list_pods(None).await;
+        assert_eq!(pods.len(), 1);
+        assert_eq!(pods[0].status, PodStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn health_report_triggers_restart_after_threshold() {
+        let handle = spawn_test_orchestrator();
+
+        let spec = DeploymentSpec {
+            project: "test".into(),
+            deployment: DeploymentMeta { name: "api".into() },
+            replicas: 1,
+            image: "nginx".into(),
+            ports: vec![3000],
+            env: HashMap::new(),
+            volumes: vec![],
+            secrets: vec![],
+            network: None,
+            healthcheck: Some(HealthCheck {
+                path: "/health".into(),
+                interval: "10s".into(),
+                timeout: "5s".into(),
+                retries: 3,
+            }),
+            restart: RestartPolicy::default(),
+            resources: None,
+        };
+
+        handle.deploy(spec).await.unwrap();
+        let pods = handle.list_pods(None).await;
+        let original_pod_id = pods[0].id;
+
+        // Report 3 failures to trigger restart
+        for _ in 0..3 {
+            handle.report_health(original_pod_id, false).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // After restart, there should still be 1 pod but with a different id
+        let pods = handle.list_pods(None).await;
+        assert_eq!(pods.len(), 1);
+        assert_ne!(pods[0].id, original_pod_id, "pod should have been replaced");
+        assert_eq!(pods[0].status, PodStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn get_health_probe_targets_returns_due_pods() {
+        let handle = spawn_test_orchestrator();
+
+        let spec = DeploymentSpec {
+            project: "test".into(),
+            deployment: DeploymentMeta { name: "api".into() },
+            replicas: 1,
+            image: "nginx".into(),
+            ports: vec![3000],
+            env: HashMap::new(),
+            volumes: vec![],
+            secrets: vec![],
+            network: None,
+            healthcheck: Some(HealthCheck {
+                path: "/health".into(),
+                interval: "1s".into(),
+                timeout: "5s".into(),
+                retries: 3,
+            }),
+            restart: RestartPolicy::default(),
+            resources: None,
+        };
+
+        handle.deploy(spec).await.unwrap();
+
+        // Immediately after registration, no pods should be due (last_probe is now)
+        let targets = handle.get_health_probe_targets().await;
+        assert!(targets.is_empty());
+
+        // Wait for interval to elapse
+        tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
+
+        let targets = handle.get_health_probe_targets().await;
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].1.path, "/health");
+        assert_eq!(targets[0].1.port, 3000);
     }
 
     // ---- Task 8 tests ----
