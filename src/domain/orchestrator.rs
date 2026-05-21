@@ -7,6 +7,8 @@ use uuid::Uuid;
 use crate::domain::models::*;
 use crate::error::{NexaError, Result};
 use crate::ports::runtime::{ContainerConfig, ContainerRuntime, LogStream};
+use crate::ports::state::StateStore;
+use crate::ports::runtime::ContainerState;
 
 pub enum Command {
     Deploy {
@@ -139,17 +141,22 @@ impl OrchestratorHandle {
 
 pub struct Orchestrator {
     runtime: Arc<dyn ContainerRuntime>,
+    state_store: Option<Arc<dyn StateStore>>,
     projects: StdHashMap<String, Project>,
     deployments: StdHashMap<Uuid, Deployment>,
     pods: StdHashMap<Uuid, Pod>,
 }
 
 impl Orchestrator {
-    pub fn spawn(runtime: Arc<dyn ContainerRuntime>) -> OrchestratorHandle {
+    pub fn spawn(
+        runtime: Arc<dyn ContainerRuntime>,
+        state_store: Option<Arc<dyn StateStore>>,
+    ) -> OrchestratorHandle {
         let (tx, rx) = mpsc::channel(256);
         tokio::spawn(async move {
             let mut orch = Self {
                 runtime,
+                state_store,
                 projects: StdHashMap::new(),
                 deployments: StdHashMap::new(),
                 pods: StdHashMap::new(),
@@ -160,6 +167,8 @@ impl Orchestrator {
     }
 
     async fn run(&mut self, mut rx: mpsc::Receiver<Command>) {
+        self.load_state().await;
+        self.reconcile_stale_pods().await;
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 Command::Deploy { spec, reply } => {
@@ -198,9 +207,96 @@ impl Orchestrator {
         }
     }
 
-    fn ensure_project(&mut self, name: &str) {
+    async fn load_state(&mut self) {
+        let Some(store) = &self.state_store else { return };
+        match store.list_projects().await {
+            Ok(projects) => {
+                for p in projects {
+                    self.projects.insert(p.name.clone(), p);
+                }
+                tracing::info!(count = self.projects.len(), "loaded projects from state store");
+            }
+            Err(e) => tracing::error!(error = %e, "failed to load projects"),
+        }
+        match store.list_deployments(None).await {
+            Ok(deployments) => {
+                for d in deployments {
+                    self.deployments.insert(d.id, d);
+                }
+                tracing::info!(count = self.deployments.len(), "loaded deployments from state store");
+            }
+            Err(e) => tracing::error!(error = %e, "failed to load deployments"),
+        }
+        match store.list_pods(None).await {
+            Ok(pods) => {
+                for p in pods {
+                    self.pods.insert(p.id, p);
+                }
+                tracing::info!(count = self.pods.len(), "loaded pods from state store");
+            }
+            Err(e) => tracing::error!(error = %e, "failed to load pods"),
+        }
+    }
+
+    async fn reconcile_stale_pods(&mut self) {
+        let running_pod_ids: Vec<Uuid> = self.pods.values()
+            .filter(|p| p.status == PodStatus::Running && p.container_id.is_some())
+            .map(|p| p.id)
+            .collect();
+        if running_pod_ids.is_empty() { return; }
+        tracing::info!(count = running_pod_ids.len(), "reconciling pods with runtime");
+        for pod_id in running_pod_ids {
+            let container_id = match self.pods.get(&pod_id) {
+                Some(p) => match &p.container_id { Some(cid) => cid.clone(), None => continue },
+                None => continue,
+            };
+            let is_running = match self.runtime.inspect_container(&container_id).await {
+                Ok(info) => info.state == ContainerState::Running,
+                Err(_) => false,
+            };
+            if !is_running {
+                if let Some(pod) = self.pods.get_mut(&pod_id) {
+                    tracing::warn!(pod_id = %pod_id, container_id = %container_id, "pod container not running, marking Failed");
+                    pod.status = PodStatus::Failed;
+                    let cloned = pod.clone();
+                    self.persist_update_pod(&cloned).await;
+                }
+            }
+        }
+        let deployment_ids: Vec<Uuid> = self.deployments.keys().cloned().collect();
+        for deployment_id in deployment_ids {
+            let desired = match self.deployments.get(&deployment_id) {
+                Some(d) => d.spec.replicas, None => continue,
+            };
+            let (all_running, any_failed) = self.pods.values()
+                .filter(|p| p.deployment_id == deployment_id)
+                .fold((true, false), |(all_r, any_f), p| match p.status {
+                    PodStatus::Running => (all_r, any_f),
+                    PodStatus::Failed => (false, true),
+                    _ => (false, any_f),
+                });
+            if let Some(d) = self.deployments.get_mut(&deployment_id) {
+                let new_status = if all_running && desired > 0 {
+                    DeploymentStatus::Running
+                } else if any_failed {
+                    DeploymentStatus::Degraded
+                } else {
+                    DeploymentStatus::Pending
+                };
+                if d.status != new_status {
+                    d.status = new_status;
+                    let cloned = d.clone();
+                    self.persist_update_deployment(&cloned).await;
+                }
+            }
+        }
+    }
+
+    async fn ensure_project(&mut self, name: &str) {
         if !self.projects.contains_key(name) {
-            self.projects.insert(name.to_string(), Project::new(name));
+            let project = Project::new(name);
+            self.projects.insert(name.to_string(), project.clone());
+            self.persist_insert_project(&project).await;
         }
     }
 
@@ -218,7 +314,7 @@ impl Orchestrator {
     }
 
     async fn handle_deploy(&mut self, spec: DeploymentSpec) -> Result<Deployment> {
-        self.ensure_project(&spec.project);
+        self.ensure_project(&spec.project).await;
 
         let existing_id = self.find_deployment_id(&spec.project, &spec.deployment.name);
 
@@ -226,13 +322,16 @@ impl Orchestrator {
             let deployment = self.deployments.get_mut(&id).unwrap();
             deployment.spec = spec.clone();
             deployment.updated_at = chrono::Utc::now();
-            let id = deployment.id;
+            let cloned = deployment.clone();
+            self.persist_update_deployment(&cloned).await;
+            let id = cloned.id;
             self.reconcile_deployment(id).await?;
             return Ok(self.deployments[&id].clone());
         }
 
         let deployment = Deployment::from_spec(spec);
         let id = deployment.id;
+        self.persist_insert_deployment(&deployment).await;
         self.deployments.insert(id, deployment);
         self.reconcile_deployment(id).await?;
         Ok(self.deployments[&id].clone())
@@ -279,11 +378,14 @@ impl Orchestrator {
                     let _ = self.runtime.remove_container(cid, true).await;
                 }
             }
+            self.persist_delete_pod(pod_id).await;
             self.pods.remove(pod_id);
         }
 
         if let Some(d) = self.deployments.get_mut(&deployment_id) {
             d.status = DeploymentStatus::Stopped;
+            let cloned = d.clone();
+            self.persist_update_deployment(&cloned).await;
         }
 
         Ok(())
@@ -294,6 +396,9 @@ impl Orchestrator {
         let id = self
             .find_deployment_id(project, name)
             .ok_or_else(|| NexaError::DeploymentNotFound(format!("{project}/{name}")))?;
+        if let Some(store) = &self.state_store {
+            let _ = store.delete_deployment(&id).await;
+        }
         self.deployments.remove(&id);
         Ok(())
     }
@@ -356,6 +461,7 @@ impl Orchestrator {
                         let _ = self.runtime.remove_container(cid, true).await;
                     }
                 }
+                self.persist_delete_pod(&pod_id).await;
                 self.pods.remove(&pod_id);
             }
         }
@@ -380,6 +486,8 @@ impl Orchestrator {
             } else {
                 DeploymentStatus::Pending
             };
+            let cloned = d.clone();
+            self.persist_update_deployment(&cloned).await;
         }
 
         Ok(())
@@ -450,6 +558,7 @@ impl Orchestrator {
             }
         }
 
+        self.persist_insert_pod(&pod).await;
         self.pods.insert(pod.id, pod);
         Ok(())
     }
@@ -460,43 +569,66 @@ impl Orchestrator {
             .find(|d| d.project() == project && d.name() == name)
             .map(|d| d.id)
     }
+
+    // ---- Persistence helpers ----
+
+    async fn persist_insert_project(&self, project: &Project) {
+        if let Some(store) = &self.state_store {
+            if let Err(e) = store.insert_project(project).await {
+                tracing::warn!(project = %project.name, error = %e, "failed to persist project");
+            }
+        }
+    }
+
+    async fn persist_insert_deployment(&self, deployment: &Deployment) {
+        if let Some(store) = &self.state_store {
+            if let Err(e) = store.insert_deployment(deployment).await {
+                tracing::warn!(id = %deployment.id, error = %e, "failed to persist deployment insert");
+            }
+        }
+    }
+
+    async fn persist_update_deployment(&self, deployment: &Deployment) {
+        if let Some(store) = &self.state_store {
+            if let Err(e) = store.update_deployment(deployment).await {
+                tracing::warn!(id = %deployment.id, error = %e, "failed to persist deployment update");
+            }
+        }
+    }
+
+    async fn persist_insert_pod(&self, pod: &Pod) {
+        if let Some(store) = &self.state_store {
+            if let Err(e) = store.insert_pod(pod).await {
+                tracing::warn!(id = %pod.id, error = %e, "failed to persist pod insert");
+            }
+        }
+    }
+
+    async fn persist_update_pod(&self, pod: &Pod) {
+        if let Some(store) = &self.state_store {
+            if let Err(e) = store.update_pod(pod).await {
+                tracing::warn!(id = %pod.id, error = %e, "failed to persist pod update");
+            }
+        }
+    }
+
+    async fn persist_delete_pod(&self, id: &Uuid) {
+        if let Some(store) = &self.state_store {
+            if let Err(e) = store.delete_pod(id).await {
+                tracing::warn!(pod_id = %id, error = %e, "failed to persist pod delete");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn handle_create_project_sends_command() {
-        let (tx, mut rx) = mpsc::channel(16);
-        let handle = OrchestratorHandle { tx };
-
-        tokio::spawn(async move {
-            if let Some(Command::CreateProject { name, reply }) = rx.recv().await {
-                assert_eq!(name, "test-project");
-                let _ = reply.send(Ok(Project::new("test-project")));
-            }
-        });
-
-        let result = handle.create_project("test-project".into()).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().name, "test-project");
-    }
-
-    #[tokio::test]
-    async fn handle_returns_error_when_orchestrator_stopped() {
-        let (tx, rx) = mpsc::channel(1);
-        let handle = OrchestratorHandle { tx };
-        drop(rx);
-
-        let result = handle.create_project("test".into()).await;
-        assert!(result.is_err());
-    }
-
     use std::collections::HashMap;
-    use std::pin::Pin;
-    use futures::Stream;
+    use std::sync::Mutex as StdMutex;
     use crate::ports::runtime::*;
+    use crate::ports::state::StateStore;
+    use crate::ports::state_memory::InMemoryStore;
 
     struct MockRuntime;
 
@@ -526,8 +658,76 @@ mod tests {
         async fn connect_to_network(&self, _id: &str, _net: &str) -> Result<()> { Ok(()) }
     }
 
+    struct ConfigurableMockRuntime {
+        container_states: StdMutex<StdHashMap<String, ContainerState>>,
+    }
+
+    impl ConfigurableMockRuntime {
+        fn new() -> Self {
+            Self { container_states: StdMutex::new(StdHashMap::new()) }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ContainerRuntime for ConfigurableMockRuntime {
+        async fn pull_image(&self, _: &str) -> Result<()> { Ok(()) }
+        async fn create_container(&self, config: &ContainerConfig) -> Result<String> {
+            let id = format!("mock-{}", config.name);
+            self.container_states.lock().unwrap().insert(id.clone(), ContainerState::Running);
+            Ok(id)
+        }
+        async fn start_container(&self, _: &str) -> Result<()> { Ok(()) }
+        async fn stop_container(&self, _: &str, _: u64) -> Result<()> { Ok(()) }
+        async fn remove_container(&self, _: &str, _: bool) -> Result<()> { Ok(()) }
+        async fn inspect_container(&self, id: &str) -> Result<ContainerInfo> {
+            let states = self.container_states.lock().unwrap();
+            match states.get(id) {
+                Some(state) => Ok(ContainerInfo { id: id.into(), name: id.into(), image: "mock".into(), state: state.clone() }),
+                None => Err(NexaError::Runtime(format!("container {id} not found"))),
+            }
+        }
+        async fn logs(&self, _: &str, _: Option<u64>) -> Result<LogStream> { Ok(Box::pin(futures::stream::empty())) }
+        async fn container_exists(&self, _: &str) -> Result<bool> { Ok(false) }
+        async fn create_network(&self, _: &str) -> Result<String> { Ok("net-id".into()) }
+        async fn remove_network(&self, _: &str) -> Result<()> { Ok(()) }
+        async fn connect_to_network(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
+    }
+
     fn spawn_test_orchestrator() -> OrchestratorHandle {
-        Orchestrator::spawn(Arc::new(MockRuntime))
+        Orchestrator::spawn(Arc::new(MockRuntime), None)
+    }
+
+    fn spawn_persisted_test_orchestrator() -> (OrchestratorHandle, Arc<InMemoryStore>) {
+        let store = Arc::new(InMemoryStore::new());
+        let handle = Orchestrator::spawn(Arc::new(MockRuntime), Some(store.clone() as Arc<dyn StateStore>));
+        (handle, store)
+    }
+
+    #[tokio::test]
+    async fn handle_create_project_sends_command() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let handle = OrchestratorHandle { tx };
+
+        tokio::spawn(async move {
+            if let Some(Command::CreateProject { name, reply }) = rx.recv().await {
+                assert_eq!(name, "test-project");
+                let _ = reply.send(Ok(Project::new("test-project")));
+            }
+        });
+
+        let result = handle.create_project("test-project".into()).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().name, "test-project");
+    }
+
+    #[tokio::test]
+    async fn handle_returns_error_when_orchestrator_stopped() {
+        let (tx, rx) = mpsc::channel(1);
+        let handle = OrchestratorHandle { tx };
+        drop(rx);
+
+        let result = handle.create_project("test".into()).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -676,7 +876,7 @@ mod tests {
         let runtime = Arc::new(CapturingRuntime {
             configs: Mutex::new(Vec::new()),
         });
-        let handle = Orchestrator::spawn(runtime.clone());
+        let handle = Orchestrator::spawn(runtime.clone(), None);
 
         let spec = DeploymentSpec {
             project: "test".into(),
@@ -718,5 +918,179 @@ mod tests {
         assert_eq!(vols[1].source, "/host/uploads");
         assert_eq!(vols[1].target, "/app/uploads");
         assert!(vols[1].read_only);
+    }
+
+    // ---- Task 6 tests ----
+
+    #[tokio::test]
+    async fn deploy_persists_to_state_store() {
+        let (handle, store) = spawn_persisted_test_orchestrator();
+
+        let spec = DeploymentSpec {
+            project: "myapp".into(),
+            deployment: DeploymentMeta { name: "web".into() },
+            replicas: 2,
+            image: "nginx".into(),
+            ports: vec![],
+            env: HashMap::new(),
+            secrets: vec![],
+            volumes: vec![],
+            network: None,
+            healthcheck: None,
+            restart: RestartPolicy::default(),
+            resources: None,
+        };
+
+        handle.deploy(spec).await.unwrap();
+
+        let projects = store.list_projects().await.unwrap();
+        assert_eq!(projects.len(), 1);
+
+        let deployments = store.list_deployments(None).await.unwrap();
+        assert_eq!(deployments.len(), 1);
+
+        let pods = store.list_pods(None).await.unwrap();
+        assert_eq!(pods.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn stop_persists_to_state_store() {
+        let (handle, store) = spawn_persisted_test_orchestrator();
+
+        let spec = DeploymentSpec {
+            project: "myapp".into(),
+            deployment: DeploymentMeta { name: "web".into() },
+            replicas: 2,
+            image: "nginx".into(),
+            ports: vec![],
+            env: HashMap::new(),
+            secrets: vec![],
+            volumes: vec![],
+            network: None,
+            healthcheck: None,
+            restart: RestartPolicy::default(),
+            resources: None,
+        };
+
+        handle.deploy(spec).await.unwrap();
+        handle.stop("myapp".into(), "web".into()).await.unwrap();
+
+        let pods = store.list_pods(None).await.unwrap();
+        assert_eq!(pods.len(), 0);
+
+        let deployments = store.list_deployments(None).await.unwrap();
+        assert_eq!(deployments.len(), 1);
+        assert_eq!(deployments[0].status, DeploymentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn scale_persists_to_state_store() {
+        let (handle, store) = spawn_persisted_test_orchestrator();
+
+        let spec = DeploymentSpec {
+            project: "myapp".into(),
+            deployment: DeploymentMeta { name: "web".into() },
+            replicas: 1,
+            image: "nginx".into(),
+            ports: vec![],
+            env: HashMap::new(),
+            secrets: vec![],
+            volumes: vec![],
+            network: None,
+            healthcheck: None,
+            restart: RestartPolicy::default(),
+            resources: None,
+        };
+
+        handle.deploy(spec).await.unwrap();
+        handle.scale("myapp".into(), "web".into(), 3).await.unwrap();
+
+        let pods = store.list_pods(None).await.unwrap();
+        assert_eq!(pods.len(), 3);
+    }
+
+    // ---- Task 7 tests ----
+
+    #[tokio::test]
+    async fn loads_state_on_startup() {
+        let store = Arc::new(InMemoryStore::new());
+        let project = Project::new("loaded");
+        store.insert_project(&project).await.unwrap();
+        let spec = DeploymentSpec {
+            project: "loaded".into(),
+            deployment: DeploymentMeta { name: "web".into() },
+            replicas: 1,
+            image: "nginx".into(),
+            ports: vec![],
+            env: HashMap::new(),
+            secrets: vec![],
+            volumes: vec![],
+            network: None,
+            healthcheck: None,
+            restart: RestartPolicy::default(),
+            resources: None,
+        };
+        let mut deployment = Deployment::from_spec(spec);
+        deployment.status = DeploymentStatus::Running;
+        store.insert_deployment(&deployment).await.unwrap();
+        let mut pod = Pod::new(deployment.id, "loaded", "web", 0, "nginx");
+        pod.status = PodStatus::Running;
+        pod.container_id = Some("old-container-123".into());
+        store.insert_pod(&pod).await.unwrap();
+
+        let handle = Orchestrator::spawn(Arc::new(MockRuntime), Some(store.clone() as Arc<dyn StateStore>));
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let projects = handle.list_projects().await;
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "loaded");
+        let deployments = handle.list_deployments(Some("loaded".into())).await;
+        assert_eq!(deployments.len(), 1);
+        assert_eq!(deployments[0].name(), "web");
+    }
+
+    // ---- Task 8 tests ----
+
+    #[tokio::test]
+    async fn reconcile_marks_stale_pods_failed() {
+        let store = Arc::new(InMemoryStore::new());
+        let project = Project::new("myapp");
+        store.insert_project(&project).await.unwrap();
+
+        let spec = DeploymentSpec {
+            project: "myapp".into(),
+            deployment: DeploymentMeta { name: "web".into() },
+            replicas: 1,
+            image: "nginx".into(),
+            ports: vec![],
+            env: HashMap::new(),
+            secrets: vec![],
+            volumes: vec![],
+            network: None,
+            healthcheck: None,
+            restart: RestartPolicy::default(),
+            resources: None,
+        };
+        let mut deployment = Deployment::from_spec(spec);
+        deployment.status = DeploymentStatus::Running;
+        store.insert_deployment(&deployment).await.unwrap();
+
+        let mut pod = Pod::new(deployment.id, "myapp", "web", 0, "nginx");
+        pod.status = PodStatus::Running;
+        pod.container_id = Some("vanished-container".into());
+        store.insert_pod(&pod).await.unwrap();
+
+        // ConfigurableMockRuntime has no knowledge of "vanished-container"
+        let runtime = Arc::new(ConfigurableMockRuntime::new());
+        let handle = Orchestrator::spawn(runtime, Some(store.clone() as Arc<dyn StateStore>));
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        let pods = handle.list_pods(None).await;
+        assert_eq!(pods.len(), 1);
+        assert_eq!(pods[0].status, PodStatus::Failed);
+
+        let deployments = handle.list_deployments(None).await;
+        assert_eq!(deployments.len(), 1);
+        assert_eq!(deployments[0].status, DeploymentStatus::Degraded);
     }
 }
