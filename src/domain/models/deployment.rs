@@ -145,6 +145,33 @@ pub enum DeploymentStatus {
     Failed,
 }
 
+impl std::fmt::Display for DeploymentStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeploymentStatus::Pending => write!(f, "pending"),
+            DeploymentStatus::Running => write!(f, "running"),
+            DeploymentStatus::Degraded => write!(f, "degraded"),
+            DeploymentStatus::Stopped => write!(f, "stopped"),
+            DeploymentStatus::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+impl std::str::FromStr for DeploymentStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(DeploymentStatus::Pending),
+            "running" => Ok(DeploymentStatus::Running),
+            "degraded" => Ok(DeploymentStatus::Degraded),
+            "stopped" => Ok(DeploymentStatus::Stopped),
+            "failed" => Ok(DeploymentStatus::Failed),
+            other => Err(format!("unknown deployment status: {other}")),
+        }
+    }
+}
+
 impl Deployment {
     pub fn from_spec(spec: DeploymentSpec) -> Self {
         let now = Utc::now();

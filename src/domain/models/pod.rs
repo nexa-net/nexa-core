@@ -12,6 +12,7 @@ pub struct Pod {
     pub container_id: Option<String>,
     pub status: PodStatus,
     pub image: String,
+    pub restart_count: u32,
     pub created_at: DateTime<Utc>,
 }
 
@@ -44,6 +45,7 @@ impl Pod {
             container_id: None,
             status: PodStatus::Pending,
             image: image.to_string(),
+            restart_count: 0,
             created_at: Utc::now(),
         }
     }
@@ -67,5 +69,39 @@ impl std::fmt::Display for PodStatus {
             PodStatus::Failed => write!(f, "Failed"),
             PodStatus::Restarting => write!(f, "Restarting"),
         }
+    }
+}
+
+impl std::str::FromStr for PodStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "pending" => Ok(PodStatus::Pending),
+            "creating" => Ok(PodStatus::Creating),
+            "running" => Ok(PodStatus::Running),
+            "stopping" => Ok(PodStatus::Stopping),
+            "stopped" => Ok(PodStatus::Stopped),
+            "failed" => Ok(PodStatus::Failed),
+            "restarting" => Ok(PodStatus::Restarting),
+            other => Err(format!("unknown pod status: {other}")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_pod_has_zero_restart_count() {
+        let pod = Pod::new(
+            Uuid::new_v4(),
+            "proj",
+            "deploy",
+            0,
+            "nginx:latest",
+        );
+        assert_eq!(pod.restart_count, 0);
     }
 }
