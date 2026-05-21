@@ -463,4 +463,73 @@ resources:
         let err = parse_deployment(yaml).unwrap_err();
         assert!(err.to_string().contains("resources.memory"));
     }
+
+    #[test]
+    fn parse_complete_target_yaml() {
+        let yaml = r#"
+project: ecommerce
+deployment:
+  name: api
+replicas: 3
+image: ghcr.io/company/api:latest
+ports:
+  - 3000
+env:
+  NODE_ENV: production
+secrets:
+  - DATABASE_URL
+  - STRIPE_KEY
+volumes:
+  - name: data
+    mount: /app/data
+  - path: /host/uploads
+    mount: /app/uploads
+    readonly: true
+network:
+  public: true
+  domain: api.example.com
+  https: true
+healthcheck:
+  path: /health
+  interval: 10s
+  timeout: 5s
+  retries: 3
+restart: always
+resources:
+  memory: 512m
+  cpu: 0.5
+"#;
+        let spec = parse_deployment(yaml).unwrap();
+
+        assert_eq!(spec.project, "ecommerce");
+        assert_eq!(spec.deployment.name, "api");
+        assert_eq!(spec.replicas, 3);
+        assert_eq!(spec.image, "ghcr.io/company/api:latest");
+        assert_eq!(spec.ports, vec![3000]);
+        assert_eq!(spec.env.get("NODE_ENV").unwrap(), "production");
+        assert_eq!(spec.secrets, vec!["DATABASE_URL", "STRIPE_KEY"]);
+
+        assert_eq!(spec.volumes.len(), 2);
+        assert_eq!(spec.volumes[0].source_name(), "data");
+        assert_eq!(spec.volumes[0].mount_point(), "/app/data");
+        assert!(!spec.volumes[0].is_read_only());
+        assert_eq!(spec.volumes[1].source_name(), "/host/uploads");
+        assert_eq!(spec.volumes[1].mount_point(), "/app/uploads");
+        assert!(spec.volumes[1].is_read_only());
+
+        let net = spec.network.unwrap();
+        assert!(net.public);
+        assert_eq!(net.domain.unwrap(), "api.example.com");
+        assert!(net.https);
+
+        let hc = spec.healthcheck.unwrap();
+        assert_eq!(hc.path, "/health");
+        assert_eq!(hc.interval, "10s");
+        assert_eq!(hc.timeout, "5s");
+        assert_eq!(hc.retries, 3);
+
+        let res = spec.resources.unwrap();
+        assert_eq!(res.memory, "512m");
+        assert!((res.cpu - 0.5).abs() < f64::EPSILON);
+    }
 }
