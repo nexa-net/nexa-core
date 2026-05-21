@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::error::{NexaError, Result};
-use crate::models::DeploymentSpec;
+use crate::domain::models::DeploymentSpec;
 
 pub fn parse_deployment_file(path: &Path) -> Result<DeploymentSpec> {
     let content = std::fs::read_to_string(path)?;
