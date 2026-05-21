@@ -1,7 +1,9 @@
 use std::path::Path;
 
-use crate::error::{NexaError, Result};
+use regex::Regex;
+
 use crate::domain::models::DeploymentSpec;
+use crate::error::{NexaError, Result};
 
 pub fn parse_deployment_file(path: &Path) -> Result<DeploymentSpec> {
     let content = std::fs::read_to_string(path)?;
@@ -15,13 +17,29 @@ pub fn parse_deployment(yaml: &str) -> Result<DeploymentSpec> {
     Ok(spec)
 }
 
+fn validate_dns_name(value: &str, field: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(NexaError::InvalidSpec(format!("{field} is required")));
+    }
+    if value.len() > 63 {
+        return Err(NexaError::InvalidSpec(format!(
+            "{field} must be at most 63 characters, got {}",
+            value.len()
+        )));
+    }
+    let dns_re = Regex::new(r"^[a-z0-9][a-z0-9-]*$").unwrap();
+    if !dns_re.is_match(value) {
+        return Err(NexaError::InvalidSpec(format!(
+            "{field} must be DNS-safe: start with [a-z0-9], then [a-z0-9-] only (got '{value}')"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_spec(spec: &DeploymentSpec) -> Result<()> {
-    if spec.project.is_empty() {
-        return Err(NexaError::InvalidSpec("project name is required".into()));
-    }
-    if spec.deployment.name.is_empty() {
-        return Err(NexaError::InvalidSpec("deployment name is required".into()));
-    }
+    validate_dns_name(&spec.project, "project")?;
+    validate_dns_name(&spec.deployment.name, "deployment name")?;
+
     if spec.image.is_empty() {
         return Err(NexaError::InvalidSpec("image is required".into()));
     }
@@ -29,6 +47,39 @@ fn validate_spec(spec: &DeploymentSpec) -> Result<()> {
         return Err(NexaError::InvalidSpec(
             "replicas must be at least 1".into(),
         ));
+    }
+
+    for &port in &spec.ports {
+        if port == 0 {
+            return Err(NexaError::InvalidSpec(
+                "port must be between 1 and 65535, got 0".into(),
+            ));
+        }
+    }
+
+    if let Some(ref res) = spec.resources {
+        validate_resource_memory(&res.memory)?;
+        if res.cpu <= 0.0 {
+            return Err(NexaError::InvalidSpec(
+                "resources.cpu must be greater than 0".into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_resource_memory(memory: &str) -> Result<()> {
+    if memory.is_empty() {
+        return Err(NexaError::InvalidSpec(
+            "resources.memory is required when resources is specified".into(),
+        ));
+    }
+    let mem_re = Regex::new(r"^[0-9]+[kmgKMG]$").unwrap();
+    if !mem_re.is_match(memory) {
+        return Err(NexaError::InvalidSpec(format!(
+            "resources.memory must match format like '512m', '1g', '256k' (got '{memory}')"
+        )));
     }
     Ok(())
 }
@@ -238,5 +289,99 @@ volumes:
 "#;
         let spec = parse_deployment(yaml).unwrap();
         assert!(!spec.volumes[0].is_read_only());
+    }
+
+    #[test]
+    fn reject_uppercase_project_name() {
+        let yaml = r#"
+project: MyApp
+deployment:
+  name: api
+image: nginx
+"#;
+        let err = parse_deployment(yaml).unwrap_err();
+        assert!(err.to_string().contains("DNS-safe"));
+    }
+
+    #[test]
+    fn reject_project_starting_with_hyphen() {
+        let yaml = r#"
+project: -myapp
+deployment:
+  name: api
+image: nginx
+"#;
+        let err = parse_deployment(yaml).unwrap_err();
+        assert!(err.to_string().contains("DNS-safe"));
+    }
+
+    #[test]
+    fn reject_project_name_too_long() {
+        let long_name = "a".repeat(64);
+        let yaml = format!(
+            r#"
+project: {long_name}
+deployment:
+  name: api
+image: nginx
+"#
+        );
+        let err = parse_deployment(&yaml).unwrap_err();
+        assert!(err.to_string().contains("63 characters"));
+    }
+
+    #[test]
+    fn reject_deployment_name_with_underscore() {
+        let yaml = r#"
+project: myapp
+deployment:
+  name: my_api
+image: nginx
+"#;
+        let err = parse_deployment(yaml).unwrap_err();
+        assert!(err.to_string().contains("DNS-safe"));
+    }
+
+    #[test]
+    fn accept_valid_dns_names() {
+        let yaml = r#"
+project: my-app-123
+deployment:
+  name: api-v2
+image: nginx:latest
+"#;
+        let spec = parse_deployment(yaml).unwrap();
+        assert_eq!(spec.project, "my-app-123");
+        assert_eq!(spec.deployment.name, "api-v2");
+    }
+
+    #[test]
+    fn reject_port_zero() {
+        let yaml = r#"
+project: myapp
+deployment:
+  name: api
+image: nginx
+ports:
+  - 0
+"#;
+        let err = parse_deployment(yaml).unwrap_err();
+        assert!(err.to_string().contains("port"));
+    }
+
+    #[test]
+    fn accept_valid_port_range() {
+        let yaml = r#"
+project: myapp
+deployment:
+  name: api
+image: nginx
+ports:
+  - 1
+  - 8080
+  - 65535
+"#;
+        let spec = parse_deployment(yaml).unwrap();
+        assert_eq!(spec.ports, vec![1, 8080, 65535]);
     }
 }
