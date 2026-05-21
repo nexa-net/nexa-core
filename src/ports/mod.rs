@@ -1,3 +1,4 @@
+pub mod cluster;
 pub mod runtime;
 pub mod secrets;
 pub mod secrets_memory;
