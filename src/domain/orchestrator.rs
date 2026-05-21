@@ -435,6 +435,7 @@ impl Orchestrator {
             }
             self.persist_delete_pod(pod_id).await;
             self.pods.remove(pod_id);
+            self.restart_states.remove(pod_id);
         }
 
         if let Some(d) = self.deployments.get_mut(&deployment_id) {
@@ -519,6 +520,7 @@ impl Orchestrator {
                 }
                 self.persist_delete_pod(&pod_id).await;
                 self.pods.remove(&pod_id);
+                self.restart_states.remove(&pod_id);
             }
         }
 
@@ -549,6 +551,33 @@ impl Orchestrator {
         Ok(())
     }
 
+    fn build_container_config(&self, spec: &DeploymentSpec, pod_id: Uuid, container_name: &str, network_name: &str) -> ContainerConfig {
+        let ports = spec.ports.iter().map(|&p| crate::ports::runtime::PortBinding {
+            container_port: p,
+            host_port: if spec.replicas == 1 { Some(p) } else { None },
+        }).collect();
+
+        let mut labels = StdHashMap::new();
+        labels.insert("managed-by".to_string(), "nexanet".to_string());
+        labels.insert("nexa.project".to_string(), spec.project.clone());
+        labels.insert("nexa.deployment".to_string(), spec.deployment.name.clone());
+        labels.insert("nexa.pod-id".to_string(), pod_id.to_string());
+
+        ContainerConfig {
+            name: container_name.to_string(),
+            image: spec.image.clone(),
+            env: spec.env.clone(),
+            ports,
+            volumes: spec.volumes.iter().map(|v| crate::ports::runtime::VolumeBinding {
+                source: v.source_name().to_string(),
+                target: v.mount_point().to_string(),
+                read_only: v.is_read_only(),
+            }).collect(),
+            labels,
+            network: Some(network_name.to_string()),
+        }
+    }
+
     async fn create_pod(&mut self, deployment_id: Uuid, spec: &DeploymentSpec, index: u32) -> Result<()> {
         let mut pod = Pod::new(
             deployment_id,
@@ -570,38 +599,7 @@ impl Orchestrator {
             let _ = self.runtime.remove_container(&container_name, true).await;
         }
 
-        let ports: Vec<crate::ports::runtime::PortBinding> = spec
-            .ports
-            .iter()
-            .map(|&p| crate::ports::runtime::PortBinding {
-                container_port: p,
-                host_port: if spec.replicas == 1 { Some(p) } else { None },
-            })
-            .collect();
-
-        let mut labels = StdHashMap::new();
-        labels.insert("managed-by".to_string(), "nexanet".to_string());
-        labels.insert("nexa.project".to_string(), spec.project.clone());
-        labels.insert("nexa.deployment".to_string(), spec.deployment.name.clone());
-        labels.insert("nexa.pod-id".to_string(), pod.id.to_string());
-
-        let config = ContainerConfig {
-            name: container_name,
-            image: spec.image.clone(),
-            env: spec.env.clone(),
-            ports,
-            volumes: spec
-                .volumes
-                .iter()
-                .map(|v| crate::ports::runtime::VolumeBinding {
-                    source: v.source_name().to_string(),
-                    target: v.mount_point().to_string(),
-                    read_only: v.is_read_only(),
-                })
-                .collect(),
-            labels,
-            network: Some(network_name.clone()),
-        };
+        let config = self.build_container_config(spec, pod.id, &container_name, &network_name);
 
         match self.runtime.create_container(&config).await {
             Ok(container_id) => {
@@ -791,6 +789,9 @@ impl Orchestrator {
         }
         let deployment_id = pod.deployment_id;
 
+        // Unregister old health tracker entry before recreating
+        self.health_tracker.unregister(&pod_id);
+
         // Remove old container (stop + remove)
         if let Some(cid) = &pod.container_id {
             let _ = self.runtime.stop_container(cid, 10).await;
@@ -814,38 +815,7 @@ impl Orchestrator {
             let _ = self.runtime.remove_container(&container_name, true).await;
         }
 
-        let ports: Vec<crate::ports::runtime::PortBinding> = spec
-            .ports
-            .iter()
-            .map(|&p| crate::ports::runtime::PortBinding {
-                container_port: p,
-                host_port: if spec.replicas == 1 { Some(p) } else { None },
-            })
-            .collect();
-
-        let mut labels = StdHashMap::new();
-        labels.insert("managed-by".to_string(), "nexanet".to_string());
-        labels.insert("nexa.project".to_string(), spec.project.clone());
-        labels.insert("nexa.deployment".to_string(), spec.deployment.name.clone());
-        labels.insert("nexa.pod-id".to_string(), pod_id.to_string());
-
-        let config = ContainerConfig {
-            name: container_name,
-            image: spec.image.clone(),
-            env: spec.env.clone(),
-            ports,
-            volumes: spec
-                .volumes
-                .iter()
-                .map(|v| crate::ports::runtime::VolumeBinding {
-                    source: v.source_name().to_string(),
-                    target: v.mount_point().to_string(),
-                    read_only: v.is_read_only(),
-                })
-                .collect(),
-            labels,
-            network: Some(network_name.clone()),
-        };
+        let config = self.build_container_config(&spec, pod_id, &container_name, &network_name);
 
         match self.runtime.create_container(&config).await {
             Ok(container_id) => {
@@ -868,9 +838,29 @@ impl Orchestrator {
                     if let Some(p) = self.pods.get_mut(&pod_id) {
                         p.container_id = Some(container_id);
                         p.status = PodStatus::Running;
-                        p.container_ip = container_ip;
+                        p.container_ip = container_ip.clone();
                         let cloned = p.clone();
                         self.persist_update_pod(&cloned).await;
+                    }
+
+                    // Re-register for health checking if configured
+                    if let (Some(hc), Some(ip)) = (&spec.healthcheck, &container_ip) {
+                        if let Some(&port) = spec.ports.first() {
+                            let interval = crate::duration::parse_duration(&hc.interval)
+                                .unwrap_or(std::time::Duration::from_secs(10));
+                            let timeout = crate::duration::parse_duration(&hc.timeout)
+                                .unwrap_or(std::time::Duration::from_secs(5));
+
+                            self.health_tracker.register(PodHealthConfig {
+                                pod_id,
+                                container_ip: ip.clone(),
+                                port,
+                                path: hc.path.clone(),
+                                interval,
+                                timeout,
+                                retries: hc.retries,
+                            });
+                        }
                     }
 
                     // Mark healthy in restart state
@@ -914,6 +904,7 @@ impl Orchestrator {
         self.health_tracker.unregister(&pod_id);
         self.persist_delete_pod(&pod_id).await;
         self.pods.remove(&pod_id);
+        self.restart_states.remove(&pod_id);
 
         // Get deployment spec
         let spec = self.deployments.get(&deployment_id)
