@@ -29,6 +29,15 @@ pub enum NexaError {
     #[error("state store error: {0}")]
     StateStore(String),
 
+    #[error("secret error: {0}")]
+    Secret(String),
+
+    #[error("project is suspended: {0}")]
+    ProjectSuspended(String),
+
+    #[error("project not empty: {0}")]
+    ProjectNotEmpty(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

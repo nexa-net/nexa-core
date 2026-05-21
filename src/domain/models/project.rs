@@ -44,6 +44,14 @@ impl Project {
             created_at: Utc::now(),
         }
     }
+
+    pub fn is_active(&self) -> bool {
+        self.status == ProjectStatus::Active
+    }
+
+    pub fn is_suspended(&self) -> bool {
+        self.status == ProjectStatus::Suspended
+    }
 }
 
 #[cfg(test)]
