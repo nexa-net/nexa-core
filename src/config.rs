@@ -384,4 +384,83 @@ ports:
         let spec = parse_deployment(yaml).unwrap();
         assert_eq!(spec.ports, vec![1, 8080, 65535]);
     }
+
+    #[test]
+    fn reject_invalid_memory_format() {
+        let yaml = r#"
+project: myapp
+deployment:
+  name: api
+image: nginx
+resources:
+  memory: 512mb
+  cpu: 0.5
+"#;
+        let err = parse_deployment(yaml).unwrap_err();
+        assert!(err.to_string().contains("resources.memory"));
+    }
+
+    #[test]
+    fn reject_zero_cpu() {
+        let yaml = r#"
+project: myapp
+deployment:
+  name: api
+image: nginx
+resources:
+  memory: 512m
+  cpu: 0.0
+"#;
+        let err = parse_deployment(yaml).unwrap_err();
+        assert!(err.to_string().contains("resources.cpu"));
+    }
+
+    #[test]
+    fn reject_negative_cpu() {
+        let yaml = r#"
+project: myapp
+deployment:
+  name: api
+image: nginx
+resources:
+  memory: 512m
+  cpu: -1.0
+"#;
+        let err = parse_deployment(yaml).unwrap_err();
+        assert!(err.to_string().contains("resources.cpu"));
+    }
+
+    #[test]
+    fn accept_valid_memory_formats() {
+        for mem in &["512m", "1g", "256k", "2G", "100M", "64K"] {
+            let yaml = format!(
+                r#"
+project: myapp
+deployment:
+  name: api
+image: nginx
+resources:
+  memory: {mem}
+  cpu: 1.0
+"#
+            );
+            let spec = parse_deployment(&yaml).unwrap();
+            assert_eq!(spec.resources.as_ref().unwrap().memory, *mem);
+        }
+    }
+
+    #[test]
+    fn reject_empty_memory() {
+        let yaml = r#"
+project: myapp
+deployment:
+  name: api
+image: nginx
+resources:
+  memory: ""
+  cpu: 1.0
+"#;
+        let err = parse_deployment(yaml).unwrap_err();
+        assert!(err.to_string().contains("resources.memory"));
+    }
 }
