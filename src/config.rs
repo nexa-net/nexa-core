@@ -111,4 +111,60 @@ replicas: 0
 "#;
         assert!(parse_deployment(yaml).is_err());
     }
+
+    #[test]
+    fn parse_secrets_field() {
+        let yaml = r#"
+project: myapp
+deployment:
+  name: api
+image: nginx:latest
+secrets:
+  - DATABASE_URL
+  - STRIPE_KEY
+"#;
+        let spec = parse_deployment(yaml).unwrap();
+        assert_eq!(spec.secrets, vec!["DATABASE_URL", "STRIPE_KEY"]);
+    }
+
+    #[test]
+    fn parse_empty_secrets_defaults_to_empty() {
+        let yaml = r#"
+project: myapp
+deployment:
+  name: api
+image: nginx:latest
+"#;
+        let spec = parse_deployment(yaml).unwrap();
+        assert!(spec.secrets.is_empty());
+    }
+
+    #[test]
+    fn parse_resources_field() {
+        let yaml = r#"
+project: myapp
+deployment:
+  name: api
+image: nginx:latest
+resources:
+  memory: 512m
+  cpu: 0.5
+"#;
+        let spec = parse_deployment(yaml).unwrap();
+        let res = spec.resources.unwrap();
+        assert_eq!(res.memory, "512m");
+        assert!((res.cpu - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parse_no_resources_defaults_to_none() {
+        let yaml = r#"
+project: myapp
+deployment:
+  name: api
+image: nginx:latest
+"#;
+        let spec = parse_deployment(yaml).unwrap();
+        assert!(spec.resources.is_none());
+    }
 }

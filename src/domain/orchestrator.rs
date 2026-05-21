@@ -542,9 +542,11 @@ mod tests {
             ports: vec![8080],
             env: HashMap::new(),
             volumes: vec![],
+            secrets: vec![],
             network: None,
             healthcheck: None,
             restart: RestartPolicy::default(),
+            resources: None,
         };
 
         let deployment = handle.deploy(spec).await.unwrap();
@@ -568,9 +570,11 @@ mod tests {
             ports: vec![],
             env: HashMap::new(),
             volumes: vec![],
+            secrets: vec![],
             network: None,
             healthcheck: None,
             restart: RestartPolicy::default(),
+            resources: None,
         };
 
         handle.deploy(spec).await.unwrap();
@@ -591,9 +595,11 @@ mod tests {
             ports: vec![],
             env: HashMap::new(),
             volumes: vec![],
+            secrets: vec![],
             network: None,
             healthcheck: None,
             restart: RestartPolicy::default(),
+            resources: None,
         };
 
         handle.deploy(spec).await.unwrap();
@@ -618,9 +624,11 @@ mod tests {
             ports: vec![],
             env: HashMap::new(),
             volumes: vec![],
+            secrets: vec![],
             network: None,
             healthcheck: None,
             restart: RestartPolicy::default(),
+            resources: None,
         };
 
         handle.deploy(spec).await.unwrap();

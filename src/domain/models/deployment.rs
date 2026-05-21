@@ -17,10 +17,13 @@ pub struct DeploymentSpec {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub volumes: Vec<VolumeMount>,
+    #[serde(default)]
+    pub secrets: Vec<String>,
     pub network: Option<NetworkConfig>,
     pub healthcheck: Option<HealthCheck>,
     #[serde(default)]
     pub restart: RestartPolicy,
+    pub resources: Option<ResourceSpec>,
 }
 
 fn default_replicas() -> u32 {
@@ -77,6 +80,12 @@ pub enum RestartPolicy {
     Always,
     OnFailure,
     Never,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceSpec {
+    pub memory: String,
+    pub cpu: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
