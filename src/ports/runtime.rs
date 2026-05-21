@@ -54,6 +54,15 @@ pub enum ContainerState {
 
 pub type LogStream = Pin<Box<dyn Stream<Item = Result<String>> + Send>>;
 
+pub type EventStream = Pin<Box<dyn Stream<Item = RuntimeEvent> + Send>>;
+
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    ContainerDied { container_id: String, exit_code: i64 },
+    ContainerStarted { container_id: String },
+    ContainerOom { container_id: String },
+}
+
 #[async_trait]
 pub trait ContainerRuntime: Send + Sync {
     async fn pull_image(&self, image: &str) -> Result<()>;
@@ -68,4 +77,20 @@ pub trait ContainerRuntime: Send + Sync {
     async fn remove_network(&self, name: &str) -> Result<()>;
     async fn connect_to_network(&self, container_id: &str, network: &str) -> Result<()>;
     async fn container_ip(&self, container_id: &str, network: &str) -> Result<String>;
+    async fn events(&self) -> Result<EventStream>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_event_variants_exist() {
+        let died = RuntimeEvent::ContainerDied { container_id: "abc123".into(), exit_code: 137 };
+        let started = RuntimeEvent::ContainerStarted { container_id: "abc123".into() };
+        let oom = RuntimeEvent::ContainerOom { container_id: "abc123".into() };
+        let _ = format!("{died:?}");
+        let _ = format!("{started:?}");
+        let _ = format!("{oom:?}");
+    }
 }

@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::domain::models::*;
 use crate::domain::health::{HealthTracker, HealthState, PodHealthConfig};
 use crate::error::{NexaError, Result};
-use crate::ports::runtime::{ContainerConfig, ContainerRuntime, LogStream};
+use crate::ports::runtime::{ContainerConfig, ContainerRuntime, EventStream, LogStream};
 use crate::ports::state::StateStore;
 use crate::ports::runtime::ContainerState;
 
@@ -796,6 +796,9 @@ mod tests {
         async fn remove_network(&self, _name: &str) -> Result<()> { Ok(()) }
         async fn connect_to_network(&self, _id: &str, _net: &str) -> Result<()> { Ok(()) }
         async fn container_ip(&self, _container_id: &str, _network: &str) -> Result<String> { Ok("172.17.0.2".to_string()) }
+        async fn events(&self) -> Result<EventStream> {
+            Ok(Box::pin(futures::stream::pending()))
+        }
     }
 
     struct ConfigurableMockRuntime {
@@ -832,6 +835,9 @@ mod tests {
         async fn remove_network(&self, _: &str) -> Result<()> { Ok(()) }
         async fn connect_to_network(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
         async fn container_ip(&self, _container_id: &str, _network: &str) -> Result<String> { Ok("172.17.0.2".to_string()) }
+        async fn events(&self) -> Result<EventStream> {
+            Ok(Box::pin(futures::stream::pending()))
+        }
     }
 
     fn spawn_test_orchestrator() -> OrchestratorHandle {
@@ -1013,6 +1019,9 @@ mod tests {
             async fn remove_network(&self, _name: &str) -> Result<()> { Ok(()) }
             async fn connect_to_network(&self, _id: &str, _net: &str) -> Result<()> { Ok(()) }
             async fn container_ip(&self, _container_id: &str, _network: &str) -> Result<String> { Ok("172.17.0.2".to_string()) }
+            async fn events(&self) -> Result<EventStream> {
+                Ok(Box::pin(futures::stream::pending()))
+            }
         }
 
         let runtime = Arc::new(CapturingRuntime {
