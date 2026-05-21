@@ -637,4 +637,86 @@ mod tests {
         let pods = handle.list_pods(None).await;
         assert_eq!(pods.len(), 0);
     }
+
+    #[tokio::test]
+    async fn deploy_maps_volume_spec_to_volume_binding() {
+        use std::sync::Mutex;
+
+        struct CapturingRuntime {
+            configs: Mutex<Vec<ContainerConfig>>,
+        }
+
+        #[async_trait::async_trait]
+        impl ContainerRuntime for CapturingRuntime {
+            async fn pull_image(&self, _image: &str) -> Result<()> { Ok(()) }
+            async fn create_container(&self, config: &ContainerConfig) -> Result<String> {
+                self.configs.lock().unwrap().push(config.clone());
+                Ok(format!("mock-{}", config.name))
+            }
+            async fn start_container(&self, _id: &str) -> Result<()> { Ok(()) }
+            async fn stop_container(&self, _id: &str, _timeout: u64) -> Result<()> { Ok(()) }
+            async fn remove_container(&self, _id: &str, _force: bool) -> Result<()> { Ok(()) }
+            async fn inspect_container(&self, _id: &str) -> Result<ContainerInfo> {
+                Ok(ContainerInfo {
+                    id: "mock".into(),
+                    name: "mock".into(),
+                    image: "mock".into(),
+                    state: ContainerState::Running,
+                })
+            }
+            async fn logs(&self, _id: &str, _tail: Option<u64>) -> Result<LogStream> {
+                Ok(Box::pin(futures::stream::empty()))
+            }
+            async fn container_exists(&self, _name: &str) -> Result<bool> { Ok(false) }
+            async fn create_network(&self, _name: &str) -> Result<String> { Ok("net-id".into()) }
+            async fn remove_network(&self, _name: &str) -> Result<()> { Ok(()) }
+            async fn connect_to_network(&self, _id: &str, _net: &str) -> Result<()> { Ok(()) }
+        }
+
+        let runtime = Arc::new(CapturingRuntime {
+            configs: Mutex::new(Vec::new()),
+        });
+        let handle = Orchestrator::spawn(runtime.clone());
+
+        let spec = DeploymentSpec {
+            project: "test".into(),
+            deployment: DeploymentMeta { name: "api".into() },
+            replicas: 1,
+            image: "nginx".into(),
+            ports: vec![],
+            env: HashMap::new(),
+            secrets: vec![],
+            volumes: vec![
+                VolumeSpec::Named(NamedVolume {
+                    name: "data".into(),
+                    mount: "/app/data".into(),
+                }),
+                VolumeSpec::Bind(BindMount {
+                    path: "/host/uploads".into(),
+                    mount: "/app/uploads".into(),
+                    readonly: true,
+                }),
+            ],
+            network: None,
+            healthcheck: None,
+            restart: RestartPolicy::default(),
+            resources: None,
+        };
+
+        handle.deploy(spec).await.unwrap();
+
+        let configs = runtime.configs.lock().unwrap();
+        assert_eq!(configs.len(), 1);
+
+        let vols = &configs[0].volumes;
+        assert_eq!(vols.len(), 2);
+
+        assert_eq!(vols[0].source, "data");
+        assert_eq!(vols[0].target, "/app/data");
+        assert!(!vols[0].read_only);
+
+        assert_eq!(vols[1].source, "/host/uploads");
+        assert_eq!(vols[1].target, "/app/uploads");
+        assert!(vols[1].read_only);
+    }
 }
