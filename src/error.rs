@@ -26,6 +26,9 @@ pub enum NexaError {
     #[error("health check failed for {0}")]
     HealthCheckFailed(String),
 
+    #[error("state store error: {0}")]
+    StateStore(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
