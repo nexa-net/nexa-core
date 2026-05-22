@@ -44,7 +44,7 @@ impl RouteStore for InMemoryRouteStore {
         let routes = self.routes.read().unwrap();
         Ok(routes
             .values()
-            .filter(|r| project.map_or(true, |p| r.project == p))
+            .filter(|r| project.is_none_or(|p| r.project == p))
             .cloned()
             .collect())
     }
