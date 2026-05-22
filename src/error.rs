@@ -70,6 +70,12 @@ pub enum NexaError {
 
     #[error("dns error: {0}")]
     Dns(String),
+
+    #[error("CNI error: {0}")]
+    Cni(String),
+
+    #[error("runtime not available: {0}")]
+    RuntimeNotAvailable(String),
 }
 
 pub type Result<T> = std::result::Result<T, NexaError>;
