@@ -14,11 +14,21 @@ pub struct SchedulerWeights {
 
 impl SchedulerWeights {
     pub fn spread() -> Self {
-        Self { cpu: 0.35, memory: 0.35, load: 0.15, failure: 0.15 }
+        Self {
+            cpu: 0.35,
+            memory: 0.35,
+            load: 0.15,
+            failure: 0.15,
+        }
     }
 
     pub fn binpack() -> Self {
-        Self { cpu: -0.30, memory: -0.30, load: -0.10, failure: 0.15 }
+        Self {
+            cpu: -0.30,
+            memory: -0.30,
+            load: -0.10,
+            failure: 0.15,
+        }
     }
 }
 
@@ -48,7 +58,10 @@ pub struct PodRequest {
 
 impl Default for PodRequest {
     fn default() -> Self {
-        Self { cpu_request: 0.0, memory_request: 0 }
+        Self {
+            cpu_request: 0.0,
+            memory_request: 0,
+        }
     }
 }
 
@@ -90,21 +103,34 @@ impl WeightedScheduler {
         let cpu_after = node.cpu_available - request.cpu_request;
         let mem_after = node.memory_available.saturating_sub(request.memory_request);
 
-        let cpu_ratio = if node.cpu_total > 0.0 { cpu_after / node.cpu_total } else { 0.0 };
-        let mem_ratio = if node.memory_total > 0 { mem_after as f64 / node.memory_total as f64 } else { 0.0 };
-        let load_ratio = if node.max_pods > 0 { node.running_pods as f64 / node.max_pods as f64 } else { 1.0 };
+        let cpu_ratio = if node.cpu_total > 0.0 {
+            cpu_after / node.cpu_total
+        } else {
+            0.0
+        };
+        let mem_ratio = if node.memory_total > 0 {
+            mem_after as f64 / node.memory_total as f64
+        } else {
+            0.0
+        };
+        let load_ratio = if node.max_pods > 0 {
+            node.running_pods as f64 / node.max_pods as f64
+        } else {
+            1.0
+        };
 
         let fail_penalty = failure_penalty(&node.recent_failures, Utc::now());
 
-        self.weights.cpu * cpu_ratio
-            + self.weights.memory * mem_ratio
+        self.weights.cpu * cpu_ratio + self.weights.memory * mem_ratio
             - self.weights.load * load_ratio
             - self.weights.failure * fail_penalty
     }
 
     pub fn select_node(&self, request: &PodRequest, nodes: &[NodeSnapshot]) -> Result<Uuid> {
         if nodes.is_empty() {
-            return Err(NexaError::SchedulingFailed("no candidate nodes available".into()));
+            return Err(NexaError::SchedulingFailed(
+                "no candidate nodes available".into(),
+            ));
         }
 
         let mut best_id: Option<Uuid> = None;
@@ -120,7 +146,9 @@ impl WeightedScheduler {
 
         match best_id {
             Some(id) if best_score > f64::NEG_INFINITY => Ok(id),
-            _ => Err(NexaError::SchedulingFailed("no node has sufficient resources".into())),
+            _ => Err(NexaError::SchedulingFailed(
+                "no node has sufficient resources".into(),
+            )),
         }
     }
 }
@@ -270,7 +298,10 @@ mod tests {
         let now = Utc::now();
         let failure = now - chrono::Duration::minutes(10);
         let penalty = failure_penalty(&[failure], now);
-        assert!((penalty - (-1.0_f64).exp()).abs() < 1e-4, "penalty = {penalty}");
+        assert!(
+            (penalty - (-1.0_f64).exp()).abs() < 1e-4,
+            "penalty = {penalty}"
+        );
     }
 
     // ── Task 3 tests: score_node ──
@@ -299,7 +330,10 @@ mod tests {
     fn score_node_fully_idle_spread() {
         let scheduler = WeightedScheduler::new(SchedulerWeights::spread());
         let node = make_node(4.0, 4.0, 8_000_000_000, 8_000_000_000, 0, 100);
-        let req = PodRequest { cpu_request: 0.5, memory_request: 512_000_000 };
+        let req = PodRequest {
+            cpu_request: 0.5,
+            memory_request: 512_000_000,
+        };
         let score = scheduler.score_node(&req, &node);
         assert!((score - 0.63385).abs() < 1e-6, "score = {score}");
     }
@@ -308,7 +342,10 @@ mod tests {
     fn score_node_half_loaded_spread() {
         let scheduler = WeightedScheduler::new(SchedulerWeights::spread());
         let node = make_node(2.0, 4.0, 4_000_000_000, 8_000_000_000, 50, 100);
-        let req = PodRequest { cpu_request: 0.0, memory_request: 0 };
+        let req = PodRequest {
+            cpu_request: 0.0,
+            memory_request: 0,
+        };
         let score = scheduler.score_node(&req, &node);
         assert!((score - 0.275).abs() < 1e-6, "score = {score}");
     }
@@ -317,7 +354,10 @@ mod tests {
     fn score_node_insufficient_cpu_returns_negative_infinity() {
         let scheduler = WeightedScheduler::new(SchedulerWeights::spread());
         let node = make_node(0.2, 4.0, 8_000_000_000, 8_000_000_000, 0, 100);
-        let req = PodRequest { cpu_request: 1.0, memory_request: 0 };
+        let req = PodRequest {
+            cpu_request: 1.0,
+            memory_request: 0,
+        };
         let score = scheduler.score_node(&req, &node);
         assert!(score == f64::NEG_INFINITY, "score = {score}");
     }
@@ -326,7 +366,10 @@ mod tests {
     fn score_node_insufficient_memory_returns_negative_infinity() {
         let scheduler = WeightedScheduler::new(SchedulerWeights::spread());
         let node = make_node(4.0, 4.0, 100_000_000, 8_000_000_000, 0, 100);
-        let req = PodRequest { cpu_request: 0.0, memory_request: 512_000_000 };
+        let req = PodRequest {
+            cpu_request: 0.0,
+            memory_request: 512_000_000,
+        };
         let score = scheduler.score_node(&req, &node);
         assert!(score == f64::NEG_INFINITY, "score = {score}");
     }
@@ -365,7 +408,10 @@ mod tests {
     #[test]
     fn select_node_picks_highest_score() {
         let scheduler = WeightedScheduler::new(SchedulerWeights::spread());
-        let req = PodRequest { cpu_request: 0.5, memory_request: 512_000_000 };
+        let req = PodRequest {
+            cpu_request: 0.5,
+            memory_request: 512_000_000,
+        };
         let idle_node = make_node(4.0, 4.0, 8_000_000_000, 8_000_000_000, 0, 100);
         let busy_node = make_node(1.0, 4.0, 2_000_000_000, 8_000_000_000, 80, 100);
         let idle_id = idle_node.node_id;
@@ -377,7 +423,10 @@ mod tests {
     #[test]
     fn select_node_skips_insufficient_nodes() {
         let scheduler = WeightedScheduler::new(SchedulerWeights::spread());
-        let req = PodRequest { cpu_request: 2.0, memory_request: 0 };
+        let req = PodRequest {
+            cpu_request: 2.0,
+            memory_request: 0,
+        };
         let small = make_node(1.0, 2.0, 8_000_000_000, 8_000_000_000, 0, 100);
         let big = make_node(4.0, 8.0, 8_000_000_000, 8_000_000_000, 0, 100);
         let big_id = big.node_id;
@@ -397,7 +446,10 @@ mod tests {
     #[test]
     fn select_node_all_nodes_insufficient_returns_error() {
         let scheduler = WeightedScheduler::new(SchedulerWeights::spread());
-        let req = PodRequest { cpu_request: 8.0, memory_request: 0 };
+        let req = PodRequest {
+            cpu_request: 8.0,
+            memory_request: 0,
+        };
         let n1 = make_node(2.0, 4.0, 8_000_000_000, 8_000_000_000, 0, 100);
         let n2 = make_node(1.0, 4.0, 8_000_000_000, 8_000_000_000, 0, 100);
         let result = scheduler.select_node(&req, &[n1, n2]);
@@ -430,7 +482,10 @@ mod tests {
     #[test]
     fn select_node_three_nodes_picks_best() {
         let scheduler = WeightedScheduler::new(SchedulerWeights::spread());
-        let req = PodRequest { cpu_request: 1.0, memory_request: 1_000_000_000 };
+        let req = PodRequest {
+            cpu_request: 1.0,
+            memory_request: 1_000_000_000,
+        };
         let n1 = make_node(2.0, 4.0, 4_000_000_000, 8_000_000_000, 50, 100);
         let n2 = make_node(4.0, 4.0, 8_000_000_000, 8_000_000_000, 10, 100);
         let n3 = make_node(3.0, 4.0, 6_000_000_000, 8_000_000_000, 30, 100);
@@ -445,7 +500,10 @@ mod tests {
     #[test]
     fn binpack_prefers_busy_node() {
         let scheduler = WeightedScheduler::new(SchedulerWeights::binpack());
-        let req = PodRequest { cpu_request: 0.5, memory_request: 512_000_000 };
+        let req = PodRequest {
+            cpu_request: 0.5,
+            memory_request: 512_000_000,
+        };
         let idle = make_node(4.0, 4.0, 8_000_000_000, 8_000_000_000, 5, 100);
         let busy = make_node(2.0, 4.0, 3_000_000_000, 8_000_000_000, 60, 100);
         let busy_id = busy.node_id;
@@ -457,7 +515,10 @@ mod tests {
     #[test]
     fn binpack_still_rejects_insufficient_resources() {
         let scheduler = WeightedScheduler::new(SchedulerWeights::binpack());
-        let req = PodRequest { cpu_request: 3.0, memory_request: 0 };
+        let req = PodRequest {
+            cpu_request: 3.0,
+            memory_request: 0,
+        };
         let busy = make_node(1.0, 4.0, 8_000_000_000, 8_000_000_000, 60, 100);
         let idle = make_node(4.0, 4.0, 8_000_000_000, 8_000_000_000, 5, 100);
         let idle_id = idle.node_id;
@@ -474,7 +535,10 @@ mod tests {
         let busy = make_node(1.0, 4.0, 2_000_000_000, 8_000_000_000, 70, 100);
         let idle_score = scheduler.score_node(&req, &idle);
         let busy_score = scheduler.score_node(&req, &busy);
-        assert!(busy_score > idle_score, "binpack should prefer busy: idle={idle_score}, busy={busy_score}");
+        assert!(
+            busy_score > idle_score,
+            "binpack should prefer busy: idle={idle_score}, busy={busy_score}"
+        );
     }
 
     #[test]
@@ -492,7 +556,10 @@ mod tests {
 
     #[test]
     fn spread_and_binpack_pick_opposite_nodes() {
-        let req = PodRequest { cpu_request: 0.5, memory_request: 512_000_000 };
+        let req = PodRequest {
+            cpu_request: 0.5,
+            memory_request: 512_000_000,
+        };
         let idle = make_node(4.0, 4.0, 8_000_000_000, 8_000_000_000, 5, 100);
         let busy = make_node(2.0, 4.0, 3_000_000_000, 8_000_000_000, 60, 100);
         let idle_id = idle.node_id;

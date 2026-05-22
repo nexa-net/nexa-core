@@ -4,9 +4,9 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use uuid::Uuid;
 
+use super::state::StateStore;
 use crate::domain::models::*;
 use crate::error::{NexaError, Result};
-use super::state::StateStore;
 
 pub struct InMemoryStore {
     projects: Mutex<HashMap<String, Project>>,
@@ -359,8 +359,18 @@ mod tests {
     #[tokio::test]
     async fn list_nodes() {
         let store = InMemoryStore::new();
-        let n1 = Node::new("w1".into(), "10.0.0.1:9000".into(), NodeRole::Worker, sample_resources());
-        let n2 = Node::new("w2".into(), "10.0.0.2:9000".into(), NodeRole::Worker, sample_resources());
+        let n1 = Node::new(
+            "w1".into(),
+            "10.0.0.1:9000".into(),
+            NodeRole::Worker,
+            sample_resources(),
+        );
+        let n2 = Node::new(
+            "w2".into(),
+            "10.0.0.2:9000".into(),
+            NodeRole::Worker,
+            sample_resources(),
+        );
 
         store.insert_node(&n1).await.unwrap();
         store.insert_node(&n2).await.unwrap();
@@ -387,7 +397,12 @@ mod tests {
         assert_eq!(fetched.status, NodeStatus::Draining);
 
         // Updating a non-existent node should error
-        let phantom = Node::new("ghost".into(), "0.0.0.0:0".into(), NodeRole::Worker, sample_resources());
+        let phantom = Node::new(
+            "ghost".into(),
+            "0.0.0.0:0".into(),
+            NodeRole::Worker,
+            sample_resources(),
+        );
         let result = store.update_node(&phantom).await;
         assert!(result.is_err());
     }
@@ -395,7 +410,12 @@ mod tests {
     #[tokio::test]
     async fn delete_node() {
         let store = InMemoryStore::new();
-        let node = Node::new("w1".into(), "10.0.0.1:9000".into(), NodeRole::Worker, sample_resources());
+        let node = Node::new(
+            "w1".into(),
+            "10.0.0.1:9000".into(),
+            NodeRole::Worker,
+            sample_resources(),
+        );
         let node_id = node.id;
 
         store.insert_node(&node).await.unwrap();
@@ -414,12 +434,18 @@ mod tests {
         assert!(val.is_none());
 
         // Set and get
-        store.set_cluster_config("leader_id", "node-abc").await.unwrap();
+        store
+            .set_cluster_config("leader_id", "node-abc")
+            .await
+            .unwrap();
         let val = store.get_cluster_config("leader_id").await.unwrap();
         assert_eq!(val.as_deref(), Some("node-abc"));
 
         // Overwrite
-        store.set_cluster_config("leader_id", "node-xyz").await.unwrap();
+        store
+            .set_cluster_config("leader_id", "node-xyz")
+            .await
+            .unwrap();
         let val = store.get_cluster_config("leader_id").await.unwrap();
         assert_eq!(val.as_deref(), Some("node-xyz"));
     }

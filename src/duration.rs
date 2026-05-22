@@ -8,19 +8,27 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
     }
 
     if let Some(ms) = s.strip_suffix("ms") {
-        let n: u64 = ms.parse().map_err(|_| NexaError::InvalidSpec(format!("invalid duration: {s}")))?;
+        let n: u64 = ms
+            .parse()
+            .map_err(|_| NexaError::InvalidSpec(format!("invalid duration: {s}")))?;
         return Ok(Duration::from_millis(n));
     }
     if let Some(h) = s.strip_suffix('h') {
-        let n: u64 = h.parse().map_err(|_| NexaError::InvalidSpec(format!("invalid duration: {s}")))?;
+        let n: u64 = h
+            .parse()
+            .map_err(|_| NexaError::InvalidSpec(format!("invalid duration: {s}")))?;
         return Ok(Duration::from_secs(n * 3600));
     }
     if let Some(m) = s.strip_suffix('m') {
-        let n: u64 = m.parse().map_err(|_| NexaError::InvalidSpec(format!("invalid duration: {s}")))?;
+        let n: u64 = m
+            .parse()
+            .map_err(|_| NexaError::InvalidSpec(format!("invalid duration: {s}")))?;
         return Ok(Duration::from_secs(n * 60));
     }
     if let Some(sec) = s.strip_suffix('s') {
-        let n: u64 = sec.parse().map_err(|_| NexaError::InvalidSpec(format!("invalid duration: {s}")))?;
+        let n: u64 = sec
+            .parse()
+            .map_err(|_| NexaError::InvalidSpec(format!("invalid duration: {s}")))?;
         return Ok(Duration::from_secs(n));
     }
 

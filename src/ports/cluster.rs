@@ -14,12 +14,7 @@ pub trait ClusterTransport: Send + Sync {
         status: &NodeStatus,
         resources: &NodeResources,
     ) -> Result<()>;
-    async fn assign_pod(
-        &self,
-        node_id: &Uuid,
-        pod: &Pod,
-        spec: &DeploymentSpec,
-    ) -> Result<()>;
+    async fn assign_pod(&self, node_id: &Uuid, pod: &Pod, spec: &DeploymentSpec) -> Result<()>;
     async fn stop_pod(&self, node_id: &Uuid, pod_id: &Uuid) -> Result<()>;
     async fn remove_pod(&self, node_id: &Uuid, pod_id: &Uuid) -> Result<()>;
     async fn stream_logs(

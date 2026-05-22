@@ -1,22 +1,26 @@
-use std::sync::Arc;
 use std::collections::HashMap as StdHashMap;
+use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
+use crate::domain::health::{HealthState, HealthTracker, PodHealthConfig};
 use crate::domain::models::*;
-use crate::domain::health::{HealthTracker, HealthState, PodHealthConfig};
 use crate::domain::restart::{self, RestartState};
-use crate::domain::scheduler::{NodeSnapshot, PodRequest, SchedulerConfig, SchedulerWeights, WeightedScheduler, parse_memory};
+use crate::domain::scheduler::{
+    NodeSnapshot, PodRequest, SchedulerConfig, SchedulerWeights, WeightedScheduler, parse_memory,
+};
 use crate::error::{NexaError, Result};
 use crate::ports::cluster::ClusterTransport;
+use crate::ports::dns::DnsProvider;
+use crate::ports::proxy::{
+    ProxyBackend, RouteConfig, TlsConfig as ProxyTlsConfig, Upstream as ProxyUpstream,
+};
+use crate::ports::route_store::RouteStore;
+use crate::ports::runtime::ContainerState;
 use crate::ports::runtime::{ContainerConfig, ContainerRuntime, LogStream};
 use crate::ports::secrets::SecretStore;
-use crate::ports::dns::DnsProvider;
-use crate::ports::proxy::{ProxyBackend, RouteConfig, TlsConfig as ProxyTlsConfig, Upstream as ProxyUpstream};
-use crate::ports::route_store::RouteStore;
 use crate::ports::state::StateStore;
-use crate::ports::runtime::ContainerState;
 
 pub enum Command {
     Deploy {
@@ -143,7 +147,10 @@ impl OrchestratorHandle {
 
     pub async fn list_deployments(&self, project: Option<String>) -> Vec<Deployment> {
         let (reply, rx) = oneshot::channel();
-        let _ = self.tx.send(Command::ListDeployments { project, reply }).await;
+        let _ = self
+            .tx
+            .send(Command::ListDeployments { project, reply })
+            .await;
         rx.await.unwrap_or_default()
     }
 
@@ -172,7 +179,11 @@ impl OrchestratorHandle {
     pub async fn stop(&self, project: String, name: String) -> Result<()> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Command::Stop { project, name, reply })
+            .send(Command::Stop {
+                project,
+                name,
+                reply,
+            })
             .await
             .map_err(|_| NexaError::Runtime("orchestrator stopped".into()))?;
         rx.await
@@ -182,7 +193,11 @@ impl OrchestratorHandle {
     pub async fn remove_deployment(&self, project: String, name: String) -> Result<()> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Command::RemoveDeployment { project, name, reply })
+            .send(Command::RemoveDeployment {
+                project,
+                name,
+                reply,
+            })
             .await
             .map_err(|_| NexaError::Runtime("orchestrator stopped".into()))?;
         rx.await
@@ -192,17 +207,32 @@ impl OrchestratorHandle {
     pub async fn scale(&self, project: String, name: String, replicas: u32) -> Result<Deployment> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Command::Scale { project, name, replicas, reply })
+            .send(Command::Scale {
+                project,
+                name,
+                replicas,
+                reply,
+            })
             .await
             .map_err(|_| NexaError::Runtime("orchestrator stopped".into()))?;
         rx.await
             .map_err(|_| NexaError::Runtime("orchestrator dropped reply".into()))?
     }
 
-    pub async fn pod_logs(&self, project: String, name: String, tail: Option<u64>) -> Result<LogStream> {
+    pub async fn pod_logs(
+        &self,
+        project: String,
+        name: String,
+        tail: Option<u64>,
+    ) -> Result<LogStream> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Command::PodLogs { project, name, tail, reply })
+            .send(Command::PodLogs {
+                project,
+                name,
+                tail,
+                reply,
+            })
             .await
             .map_err(|_| NexaError::Runtime("orchestrator stopped".into()))?;
         rx.await
@@ -210,7 +240,10 @@ impl OrchestratorHandle {
     }
 
     pub async fn report_health(&self, pod_id: Uuid, healthy: bool) {
-        let _ = self.tx.send(Command::HealthReport { pod_id, healthy }).await;
+        let _ = self
+            .tx
+            .send(Command::HealthReport { pod_id, healthy })
+            .await;
     }
 
     pub async fn get_health_probe_targets(&self) -> Vec<(Uuid, PodHealthConfig)> {
@@ -220,7 +253,10 @@ impl OrchestratorHandle {
     }
 
     pub async fn send_container_exited(&self, pod_id: Uuid, exit_code: i64) {
-        let _ = self.tx.send(Command::ContainerExited { pod_id, exit_code }).await;
+        let _ = self
+            .tx
+            .send(Command::ContainerExited { pod_id, exit_code })
+            .await;
     }
 
     pub async fn suspend_project(&self, name: String) -> Result<()> {
@@ -266,7 +302,12 @@ impl OrchestratorHandle {
     pub async fn set_secret(&self, project: String, name: String, value: Vec<u8>) -> Result<()> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Command::SetSecret { project, name, value, reply })
+            .send(Command::SetSecret {
+                project,
+                name,
+                value,
+                reply,
+            })
             .await
             .map_err(|_| NexaError::Runtime("orchestrator stopped".into()))?;
         rx.await
@@ -276,7 +317,11 @@ impl OrchestratorHandle {
     pub async fn delete_secret(&self, project: String, name: String) -> Result<()> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Command::DeleteSecret { project, name, reply })
+            .send(Command::DeleteSecret {
+                project,
+                name,
+                reply,
+            })
             .await
             .map_err(|_| NexaError::Runtime("orchestrator stopped".into()))?;
         rx.await
@@ -308,7 +353,13 @@ impl OrchestratorHandle {
     ) -> Result<()> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Command::AddRoute { domain, project, deployment, tls_mode, reply })
+            .send(Command::AddRoute {
+                domain,
+                project,
+                deployment,
+                tls_mode,
+                reply,
+            })
             .await
             .map_err(|_| NexaError::Runtime("orchestrator stopped".into()))?;
         rx.await
@@ -413,19 +464,37 @@ impl Orchestrator {
                 Command::ListProjects { reply } => {
                     let _ = reply.send(self.handle_list_projects());
                 }
-                Command::Stop { project, name, reply } => {
+                Command::Stop {
+                    project,
+                    name,
+                    reply,
+                } => {
                     let result = self.handle_stop(&project, &name).await;
                     let _ = reply.send(result);
                 }
-                Command::RemoveDeployment { project, name, reply } => {
+                Command::RemoveDeployment {
+                    project,
+                    name,
+                    reply,
+                } => {
                     let result = self.handle_remove_deployment(&project, &name).await;
                     let _ = reply.send(result);
                 }
-                Command::Scale { project, name, replicas, reply } => {
+                Command::Scale {
+                    project,
+                    name,
+                    replicas,
+                    reply,
+                } => {
                     let result = self.handle_scale(&project, &name, replicas).await;
                     let _ = reply.send(result);
                 }
-                Command::PodLogs { project, name, tail, reply } => {
+                Command::PodLogs {
+                    project,
+                    name,
+                    tail,
+                    reply,
+                } => {
                     let result = self.handle_pod_logs(&project, &name, tail).await;
                     let _ = reply.send(result);
                 }
@@ -458,11 +527,20 @@ impl Orchestrator {
                     let result = self.handle_list_secrets(&project).await;
                     let _ = reply.send(result);
                 }
-                Command::SetSecret { project, name, value, reply } => {
+                Command::SetSecret {
+                    project,
+                    name,
+                    value,
+                    reply,
+                } => {
                     let result = self.handle_set_secret(&project, &name, &value).await;
                     let _ = reply.send(result);
                 }
-                Command::DeleteSecret { project, name, reply } => {
+                Command::DeleteSecret {
+                    project,
+                    name,
+                    reply,
+                } => {
                     let result = self.handle_delete_secret(&project, &name).await;
                     let _ = reply.send(result);
                 }
@@ -472,8 +550,16 @@ impl Orchestrator {
                 Command::SetSchedulerConfig { config, reply } => {
                     let _ = reply.send(self.handle_set_scheduler_config(config));
                 }
-                Command::AddRoute { domain, project, deployment, tls_mode, reply } => {
-                    let result = self.handle_add_route(&domain, &project, &deployment, &tls_mode).await;
+                Command::AddRoute {
+                    domain,
+                    project,
+                    deployment,
+                    tls_mode,
+                    reply,
+                } => {
+                    let result = self
+                        .handle_add_route(&domain, &project, &deployment, &tls_mode)
+                        .await;
                     let _ = reply.send(result);
                 }
                 Command::RemoveRoute { domain, reply } => {
@@ -489,13 +575,18 @@ impl Orchestrator {
     }
 
     async fn load_state(&mut self) {
-        let Some(store) = &self.state_store else { return };
+        let Some(store) = &self.state_store else {
+            return;
+        };
         match store.list_projects().await {
             Ok(projects) => {
                 for p in projects {
                     self.projects.insert(p.name.clone(), p);
                 }
-                tracing::info!(count = self.projects.len(), "loaded projects from state store");
+                tracing::info!(
+                    count = self.projects.len(),
+                    "loaded projects from state store"
+                );
             }
             Err(e) => tracing::error!(error = %e, "failed to load projects"),
         }
@@ -504,7 +595,10 @@ impl Orchestrator {
                 for d in deployments {
                     self.deployments.insert(d.id, d);
                 }
-                tracing::info!(count = self.deployments.len(), "loaded deployments from state store");
+                tracing::info!(
+                    count = self.deployments.len(),
+                    "loaded deployments from state store"
+                );
             }
             Err(e) => tracing::error!(error = %e, "failed to load deployments"),
         }
@@ -520,15 +614,25 @@ impl Orchestrator {
     }
 
     async fn reconcile_stale_pods(&mut self) {
-        let running_pod_ids: Vec<Uuid> = self.pods.values()
+        let running_pod_ids: Vec<Uuid> = self
+            .pods
+            .values()
             .filter(|p| p.status == PodStatus::Running && p.container_id.is_some())
             .map(|p| p.id)
             .collect();
-        if running_pod_ids.is_empty() { return; }
-        tracing::info!(count = running_pod_ids.len(), "reconciling pods with runtime");
+        if running_pod_ids.is_empty() {
+            return;
+        }
+        tracing::info!(
+            count = running_pod_ids.len(),
+            "reconciling pods with runtime"
+        );
         for pod_id in running_pod_ids {
             let container_id = match self.pods.get(&pod_id) {
-                Some(p) => match &p.container_id { Some(cid) => cid.clone(), None => continue },
+                Some(p) => match &p.container_id {
+                    Some(cid) => cid.clone(),
+                    None => continue,
+                },
                 None => continue,
             };
             let is_running = match self.runtime.inspect_container(&container_id).await {
@@ -547,9 +651,12 @@ impl Orchestrator {
         let deployment_ids: Vec<Uuid> = self.deployments.keys().cloned().collect();
         for deployment_id in deployment_ids {
             let desired = match self.deployments.get(&deployment_id) {
-                Some(d) => d.spec.replicas, None => continue,
+                Some(d) => d.spec.replicas,
+                None => continue,
             };
-            let (all_running, any_failed) = self.pods.values()
+            let (all_running, any_failed) = self
+                .pods
+                .values()
                 .filter(|p| p.deployment_id == deployment_id)
                 .fold((true, false), |(all_r, any_f), p| match p.status {
                     PodStatus::Running => (all_r, any_f),
@@ -583,7 +690,9 @@ impl Orchestrator {
 
     fn handle_create_project(&mut self, name: &str) -> Result<Project> {
         if self.projects.contains_key(name) {
-            return Err(NexaError::InvalidSpec(format!("project '{name}' already exists")));
+            return Err(NexaError::InvalidSpec(format!(
+                "project '{name}' already exists"
+            )));
         }
         let project = Project::new(name);
         self.projects.insert(name.to_string(), project.clone());
@@ -700,7 +809,12 @@ impl Orchestrator {
         Ok(())
     }
 
-    async fn handle_scale(&mut self, project: &str, name: &str, replicas: u32) -> Result<Deployment> {
+    async fn handle_scale(
+        &mut self,
+        project: &str,
+        name: &str,
+        replicas: u32,
+    ) -> Result<Deployment> {
         let deployment_id = self
             .find_deployment_id(project, name)
             .ok_or_else(|| NexaError::DeploymentNotFound(format!("{project}/{name}")))?;
@@ -714,7 +828,12 @@ impl Orchestrator {
         Ok(self.deployments[&deployment_id].clone())
     }
 
-    async fn handle_pod_logs(&self, project: &str, name: &str, tail: Option<u64>) -> Result<LogStream> {
+    async fn handle_pod_logs(
+        &self,
+        project: &str,
+        name: &str,
+        tail: Option<u64>,
+    ) -> Result<LogStream> {
         let pod = self
             .pods
             .values()
@@ -757,7 +876,8 @@ impl Orchestrator {
                     if let Some(dns) = &self.dns {
                         if let Some(ref ip_str) = pod.container_ip {
                             if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
-                                let _ = dns.deregister(&pod.project, &pod.deployment_name, ip).await;
+                                let _ =
+                                    dns.deregister(&pod.project, &pod.deployment_name, ip).await;
                             }
                         }
                     }
@@ -776,12 +896,10 @@ impl Orchestrator {
             .pods
             .values()
             .filter(|p| p.deployment_id == deployment_id)
-            .fold((true, false), |(all_r, any_f), p| {
-                match p.status {
-                    PodStatus::Running => (all_r, any_f),
-                    PodStatus::Failed => (false, true),
-                    _ => (false, any_f),
-                }
+            .fold((true, false), |(all_r, any_f), p| match p.status {
+                PodStatus::Running => (all_r, any_f),
+                PodStatus::Failed => (false, true),
+                _ => (false, any_f),
             });
 
         if let Some(d) = self.deployments.get_mut(&deployment_id) {
@@ -799,11 +917,22 @@ impl Orchestrator {
         Ok(())
     }
 
-    fn build_container_config(&self, spec: &DeploymentSpec, pod_id: Uuid, container_name: &str, network_name: &str, env: &StdHashMap<String, String>) -> ContainerConfig {
-        let ports = spec.ports.iter().map(|&p| crate::ports::runtime::PortBinding {
-            container_port: p,
-            host_port: if spec.replicas == 1 { Some(p) } else { None },
-        }).collect();
+    fn build_container_config(
+        &self,
+        spec: &DeploymentSpec,
+        pod_id: Uuid,
+        container_name: &str,
+        network_name: &str,
+        env: &StdHashMap<String, String>,
+    ) -> ContainerConfig {
+        let ports = spec
+            .ports
+            .iter()
+            .map(|&p| crate::ports::runtime::PortBinding {
+                container_port: p,
+                host_port: if spec.replicas == 1 { Some(p) } else { None },
+            })
+            .collect();
 
         let mut labels = StdHashMap::new();
         labels.insert("managed-by".to_string(), "nexanet".to_string());
@@ -812,10 +941,7 @@ impl Orchestrator {
         labels.insert("nexa.pod-id".to_string(), pod_id.to_string());
 
         let (dns_servers, dns_search_domains) = match &self.master_ip {
-            Some(ip) => (
-                vec![ip.clone()],
-                vec![format!("{}.internal", spec.project)],
-            ),
+            Some(ip) => (vec![ip.clone()], vec![format!("{}.internal", spec.project)]),
             None => (vec![], vec![]),
         };
 
@@ -824,11 +950,15 @@ impl Orchestrator {
             image: spec.image.clone(),
             env: env.clone(),
             ports,
-            volumes: spec.volumes.iter().map(|v| crate::ports::runtime::VolumeBinding {
-                source: v.source_name().to_string(),
-                target: v.mount_point().to_string(),
-                read_only: v.is_read_only(),
-            }).collect(),
+            volumes: spec
+                .volumes
+                .iter()
+                .map(|v| crate::ports::runtime::VolumeBinding {
+                    source: v.source_name().to_string(),
+                    target: v.mount_point().to_string(),
+                    read_only: v.is_read_only(),
+                })
+                .collect(),
             labels,
             network: Some(network_name.to_string()),
             dns: dns_servers,
@@ -836,17 +966,26 @@ impl Orchestrator {
         }
     }
 
-    async fn resolve_secrets(&self, project: &str, secret_names: &[String]) -> Result<StdHashMap<String, String>> {
+    async fn resolve_secrets(
+        &self,
+        project: &str,
+        secret_names: &[String],
+    ) -> Result<StdHashMap<String, String>> {
         let store = match &self.secret_store {
             Some(s) => s,
             None => return Ok(StdHashMap::new()),
         };
         let mut resolved = StdHashMap::new();
         for name in secret_names {
-            let value = store.get(project, name).await?
-                .ok_or_else(|| NexaError::Secret(format!("secret '{}' not found in project '{}'", name, project)))?;
-            let value_str = String::from_utf8(value)
-                .map_err(|_| NexaError::Secret(format!("secret '{}' contains invalid UTF-8", name)))?;
+            let value = store.get(project, name).await?.ok_or_else(|| {
+                NexaError::Secret(format!(
+                    "secret '{}' not found in project '{}'",
+                    name, project
+                ))
+            })?;
+            let value_str = String::from_utf8(value).map_err(|_| {
+                NexaError::Secret(format!("secret '{}' contains invalid UTF-8", name))
+            })?;
             resolved.insert(name.clone(), value_str);
         }
         Ok(resolved)
@@ -877,13 +1016,22 @@ impl Orchestrator {
 
         let pod_request = PodRequest {
             cpu_request: spec.resources.as_ref().map(|r| r.cpu).unwrap_or(0.0),
-            memory_request: spec.resources.as_ref().map(|r| parse_memory(&r.memory)).unwrap_or(0),
+            memory_request: spec
+                .resources
+                .as_ref()
+                .map(|r| parse_memory(&r.memory))
+                .unwrap_or(0),
         };
 
         self.scheduler.select_node(&pod_request, &snapshots).ok()
     }
 
-    async fn create_pod(&mut self, deployment_id: Uuid, spec: &DeploymentSpec, index: u32) -> Result<()> {
+    async fn create_pod(
+        &mut self,
+        deployment_id: Uuid,
+        spec: &DeploymentSpec,
+        index: u32,
+    ) -> Result<()> {
         let mut pod = Pod::new(
             deployment_id,
             &spec.project,
@@ -933,7 +1081,13 @@ impl Orchestrator {
                 let _ = self.runtime.remove_container(&container_name, true).await;
             }
 
-            let config = self.build_container_config(spec, pod.id, &container_name, &network_name, &final_env);
+            let config = self.build_container_config(
+                spec,
+                pod.id,
+                &container_name,
+                &network_name,
+                &final_env,
+            );
 
             match self.runtime.create_container(&config).await {
                 Ok(container_id) => {
@@ -941,12 +1095,18 @@ impl Orchestrator {
                     pod.container_id = Some(container_id.clone());
                     pod.status = PodStatus::Running;
 
-                    match self.runtime.container_ip(&container_id, &network_name).await {
+                    match self
+                        .runtime
+                        .container_ip(&container_id, &network_name)
+                        .await
+                    {
                         Ok(ip) => {
                             pod.container_ip = Some(ip.clone());
                             if let Some(dns) = &self.dns {
                                 if let Ok(parsed_ip) = ip.parse::<std::net::IpAddr>() {
-                                    let _ = dns.register(&spec.project, &spec.deployment.name, parsed_ip).await;
+                                    let _ = dns
+                                        .register(&spec.project, &spec.deployment.name, parsed_ip)
+                                        .await;
                                 }
                             }
                         }
@@ -1015,7 +1175,12 @@ impl Orchestrator {
                     tracing::error!(pod_id = %pod_id, error = %e, "failed to restart unhealthy pod");
                 }
             }
-            Some((HealthState::Failing { consecutive_failures }, _)) => {
+            Some((
+                HealthState::Failing {
+                    consecutive_failures,
+                },
+                _,
+            )) => {
                 tracing::warn!(pod_id = %pod_id, failures = consecutive_failures, "pod health check failing");
             }
             _ => {}
@@ -1065,7 +1230,8 @@ impl Orchestrator {
         }
 
         // Get or create restart state
-        let state = self.restart_states
+        let state = self
+            .restart_states
             .entry(pod_id)
             .or_insert_with(RestartState::new);
 
@@ -1175,7 +1341,8 @@ impl Orchestrator {
             let _ = self.runtime.remove_container(&container_name, true).await;
         }
 
-        let config = self.build_container_config(&spec, pod_id, &container_name, &network_name, &final_env);
+        let config =
+            self.build_container_config(&spec, pod_id, &container_name, &network_name, &final_env);
 
         match self.runtime.create_container(&config).await {
             Ok(container_id) => {
@@ -1187,7 +1354,11 @@ impl Orchestrator {
                         self.persist_update_pod(&cloned).await;
                     }
                 } else {
-                    let container_ip = match self.runtime.container_ip(&container_id, &network_name).await {
+                    let container_ip = match self
+                        .runtime
+                        .container_ip(&container_id, &network_name)
+                        .await
+                    {
                         Ok(ip) => Some(ip),
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to get container IP for restarted pod");
@@ -1249,7 +1420,9 @@ impl Orchestrator {
     }
 
     async fn restart_pod(&mut self, pod_id: Uuid) -> Result<()> {
-        let pod = self.pods.get(&pod_id)
+        let pod = self
+            .pods
+            .get(&pod_id)
             .ok_or_else(|| NexaError::PodNotFound(pod_id.to_string()))?;
         let deployment_id = pod.deployment_id;
         let replica_index = pod.replica_index;
@@ -1267,9 +1440,12 @@ impl Orchestrator {
         self.restart_states.remove(&pod_id);
 
         // Get deployment spec
-        let spec = self.deployments.get(&deployment_id)
+        let spec = self
+            .deployments
+            .get(&deployment_id)
             .ok_or_else(|| NexaError::DeploymentNotFound(deployment_id.to_string()))?
-            .spec.clone();
+            .spec
+            .clone();
 
         // Create replacement pod
         self.create_pod(deployment_id, &spec, replica_index).await?;
@@ -1285,7 +1461,9 @@ impl Orchestrator {
             Some(d) => d.spec.replicas,
             None => return,
         };
-        let (all_running, any_failed) = self.pods.values()
+        let (all_running, any_failed) = self
+            .pods
+            .values()
             .filter(|p| p.deployment_id == deployment_id)
             .fold((true, false), |(all_r, any_f), p| match p.status {
                 PodStatus::Running => (all_r, any_f),
@@ -1313,18 +1491,24 @@ impl Orchestrator {
     // ---- Project lifecycle handlers ----
 
     async fn handle_suspend_project(&mut self, name: &str) -> Result<()> {
-        let project = self.projects.get_mut(name)
+        let project = self
+            .projects
+            .get_mut(name)
             .ok_or_else(|| NexaError::ProjectNotFound(name.to_string()))?;
         project.status = ProjectStatus::Suspended;
 
         // Stop all pods in all deployments of this project
-        let deployment_ids: Vec<Uuid> = self.deployments.values()
+        let deployment_ids: Vec<Uuid> = self
+            .deployments
+            .values()
             .filter(|d| d.project() == name)
             .map(|d| d.id)
             .collect();
 
         for deployment_id in &deployment_ids {
-            let pod_ids: Vec<Uuid> = self.pods.values()
+            let pod_ids: Vec<Uuid> = self
+                .pods
+                .values()
                 .filter(|p| p.deployment_id == *deployment_id)
                 .map(|p| p.id)
                 .collect();
@@ -1335,7 +1519,8 @@ impl Orchestrator {
                     if let Some(dns) = &self.dns {
                         if let Some(ref ip_str) = pod.container_ip {
                             if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
-                                let _ = dns.deregister(&pod.project, &pod.deployment_name, ip).await;
+                                let _ =
+                                    dns.deregister(&pod.project, &pod.deployment_name, ip).await;
                             }
                         }
                     }
@@ -1358,24 +1543,32 @@ impl Orchestrator {
 
         // Persist project status update
         if let Some(store) = &self.state_store {
-            let _ = store.update_project_status(name, ProjectStatus::Suspended).await;
+            let _ = store
+                .update_project_status(name, ProjectStatus::Suspended)
+                .await;
         }
 
         Ok(())
     }
 
     async fn handle_resume_project(&mut self, name: &str) -> Result<()> {
-        let project = self.projects.get_mut(name)
+        let project = self
+            .projects
+            .get_mut(name)
             .ok_or_else(|| NexaError::ProjectNotFound(name.to_string()))?;
         project.status = ProjectStatus::Active;
 
         // Persist project status update
         if let Some(store) = &self.state_store {
-            let _ = store.update_project_status(name, ProjectStatus::Active).await;
+            let _ = store
+                .update_project_status(name, ProjectStatus::Active)
+                .await;
         }
 
         // Reconcile all deployments in this project
-        let deployment_ids: Vec<Uuid> = self.deployments.values()
+        let deployment_ids: Vec<Uuid> = self
+            .deployments
+            .values()
             .filter(|d| d.project() == name)
             .map(|d| d.id)
             .collect();
@@ -1480,7 +1673,9 @@ impl Orchestrator {
 
             let tls_config = match tls_mode {
                 TlsMode::None => ProxyTlsConfig::None,
-                TlsMode::Auto => ProxyTlsConfig::Auto { email: String::new() },
+                TlsMode::Auto => ProxyTlsConfig::Auto {
+                    email: String::new(),
+                },
                 TlsMode::Manual => ProxyTlsConfig::None,
             };
 
@@ -1577,24 +1772,34 @@ impl Orchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use std::sync::Mutex as StdMutex;
     use crate::ports::runtime::*;
     use crate::ports::state::StateStore;
     use crate::ports::state_memory::InMemoryStore;
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
 
     struct MockRuntime;
 
     #[async_trait::async_trait]
     impl ContainerRuntime for MockRuntime {
-        fn runtime_name(&self) -> &'static str { "mock" }
-        async fn pull_image(&self, _image: &str) -> Result<()> { Ok(()) }
+        fn runtime_name(&self) -> &'static str {
+            "mock"
+        }
+        async fn pull_image(&self, _image: &str) -> Result<()> {
+            Ok(())
+        }
         async fn create_container(&self, config: &ContainerConfig) -> Result<String> {
             Ok(format!("mock-{}", config.name))
         }
-        async fn start_container(&self, _id: &str) -> Result<()> { Ok(()) }
-        async fn stop_container(&self, _id: &str, _timeout: u64) -> Result<()> { Ok(()) }
-        async fn remove_container(&self, _id: &str, _force: bool) -> Result<()> { Ok(()) }
+        async fn start_container(&self, _id: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn stop_container(&self, _id: &str, _timeout: u64) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_container(&self, _id: &str, _force: bool) -> Result<()> {
+            Ok(())
+        }
         async fn inspect_container(&self, _id: &str) -> Result<ContainerInfo> {
             Ok(ContainerInfo {
                 id: "mock".into(),
@@ -1606,11 +1811,21 @@ mod tests {
         async fn logs(&self, _id: &str, _tail: Option<u64>) -> Result<LogStream> {
             Ok(Box::pin(futures::stream::empty()))
         }
-        async fn container_exists(&self, _name: &str) -> Result<bool> { Ok(false) }
-        async fn create_network(&self, _name: &str) -> Result<String> { Ok("net-id".into()) }
-        async fn remove_network(&self, _name: &str) -> Result<()> { Ok(()) }
-        async fn connect_to_network(&self, _id: &str, _net: &str) -> Result<()> { Ok(()) }
-        async fn container_ip(&self, _container_id: &str, _network: &str) -> Result<String> { Ok("172.17.0.2".to_string()) }
+        async fn container_exists(&self, _name: &str) -> Result<bool> {
+            Ok(false)
+        }
+        async fn create_network(&self, _name: &str) -> Result<String> {
+            Ok("net-id".into())
+        }
+        async fn remove_network(&self, _name: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn connect_to_network(&self, _id: &str, _net: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn container_ip(&self, _container_id: &str, _network: &str) -> Result<String> {
+            Ok("172.17.0.2".to_string())
+        }
         async fn events(&self) -> Result<EventStream> {
             Ok(Box::pin(futures::stream::pending()))
         }
@@ -1622,47 +1837,97 @@ mod tests {
 
     impl ConfigurableMockRuntime {
         fn new() -> Self {
-            Self { container_states: StdMutex::new(StdHashMap::new()) }
+            Self {
+                container_states: StdMutex::new(StdHashMap::new()),
+            }
         }
     }
 
     #[async_trait::async_trait]
     impl ContainerRuntime for ConfigurableMockRuntime {
-        fn runtime_name(&self) -> &'static str { "mock" }
-        async fn pull_image(&self, _: &str) -> Result<()> { Ok(()) }
+        fn runtime_name(&self) -> &'static str {
+            "mock"
+        }
+        async fn pull_image(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
         async fn create_container(&self, config: &ContainerConfig) -> Result<String> {
             let id = format!("mock-{}", config.name);
-            self.container_states.lock().unwrap().insert(id.clone(), ContainerState::Running);
+            self.container_states
+                .lock()
+                .unwrap()
+                .insert(id.clone(), ContainerState::Running);
             Ok(id)
         }
-        async fn start_container(&self, _: &str) -> Result<()> { Ok(()) }
-        async fn stop_container(&self, _: &str, _: u64) -> Result<()> { Ok(()) }
-        async fn remove_container(&self, _: &str, _: bool) -> Result<()> { Ok(()) }
+        async fn start_container(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn stop_container(&self, _: &str, _: u64) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_container(&self, _: &str, _: bool) -> Result<()> {
+            Ok(())
+        }
         async fn inspect_container(&self, id: &str) -> Result<ContainerInfo> {
             let states = self.container_states.lock().unwrap();
             match states.get(id) {
-                Some(state) => Ok(ContainerInfo { id: id.into(), name: id.into(), image: "mock".into(), state: state.clone() }),
+                Some(state) => Ok(ContainerInfo {
+                    id: id.into(),
+                    name: id.into(),
+                    image: "mock".into(),
+                    state: state.clone(),
+                }),
                 None => Err(NexaError::Runtime(format!("container {id} not found"))),
             }
         }
-        async fn logs(&self, _: &str, _: Option<u64>) -> Result<LogStream> { Ok(Box::pin(futures::stream::empty())) }
-        async fn container_exists(&self, _: &str) -> Result<bool> { Ok(false) }
-        async fn create_network(&self, _: &str) -> Result<String> { Ok("net-id".into()) }
-        async fn remove_network(&self, _: &str) -> Result<()> { Ok(()) }
-        async fn connect_to_network(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
-        async fn container_ip(&self, _container_id: &str, _network: &str) -> Result<String> { Ok("172.17.0.2".to_string()) }
+        async fn logs(&self, _: &str, _: Option<u64>) -> Result<LogStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+        async fn container_exists(&self, _: &str) -> Result<bool> {
+            Ok(false)
+        }
+        async fn create_network(&self, _: &str) -> Result<String> {
+            Ok("net-id".into())
+        }
+        async fn remove_network(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn connect_to_network(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn container_ip(&self, _container_id: &str, _network: &str) -> Result<String> {
+            Ok("172.17.0.2".to_string())
+        }
         async fn events(&self) -> Result<EventStream> {
             Ok(Box::pin(futures::stream::pending()))
         }
     }
 
     fn spawn_test_orchestrator() -> OrchestratorHandle {
-        Orchestrator::spawn(Arc::new(MockRuntime), None, None, None, None, None, None, None)
+        Orchestrator::spawn(
+            Arc::new(MockRuntime),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
     }
 
     fn spawn_persisted_test_orchestrator() -> (OrchestratorHandle, Arc<InMemoryStore>) {
         let store = Arc::new(InMemoryStore::new());
-        let handle = Orchestrator::spawn(Arc::new(MockRuntime), Some(store.clone() as Arc<dyn StateStore>), None, None, None, None, None, None);
+        let handle = Orchestrator::spawn(
+            Arc::new(MockRuntime),
+            Some(store.clone() as Arc<dyn StateStore>),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         (handle, store)
     }
 
@@ -1811,15 +2076,25 @@ mod tests {
 
         #[async_trait::async_trait]
         impl ContainerRuntime for CapturingRuntime {
-            fn runtime_name(&self) -> &'static str { "mock" }
-            async fn pull_image(&self, _image: &str) -> Result<()> { Ok(()) }
+            fn runtime_name(&self) -> &'static str {
+                "mock"
+            }
+            async fn pull_image(&self, _image: &str) -> Result<()> {
+                Ok(())
+            }
             async fn create_container(&self, config: &ContainerConfig) -> Result<String> {
                 self.configs.lock().unwrap().push(config.clone());
                 Ok(format!("mock-{}", config.name))
             }
-            async fn start_container(&self, _id: &str) -> Result<()> { Ok(()) }
-            async fn stop_container(&self, _id: &str, _timeout: u64) -> Result<()> { Ok(()) }
-            async fn remove_container(&self, _id: &str, _force: bool) -> Result<()> { Ok(()) }
+            async fn start_container(&self, _id: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn stop_container(&self, _id: &str, _timeout: u64) -> Result<()> {
+                Ok(())
+            }
+            async fn remove_container(&self, _id: &str, _force: bool) -> Result<()> {
+                Ok(())
+            }
             async fn inspect_container(&self, _id: &str) -> Result<ContainerInfo> {
                 Ok(ContainerInfo {
                     id: "mock".into(),
@@ -1831,11 +2106,21 @@ mod tests {
             async fn logs(&self, _id: &str, _tail: Option<u64>) -> Result<LogStream> {
                 Ok(Box::pin(futures::stream::empty()))
             }
-            async fn container_exists(&self, _name: &str) -> Result<bool> { Ok(false) }
-            async fn create_network(&self, _name: &str) -> Result<String> { Ok("net-id".into()) }
-            async fn remove_network(&self, _name: &str) -> Result<()> { Ok(()) }
-            async fn connect_to_network(&self, _id: &str, _net: &str) -> Result<()> { Ok(()) }
-            async fn container_ip(&self, _container_id: &str, _network: &str) -> Result<String> { Ok("172.17.0.2".to_string()) }
+            async fn container_exists(&self, _name: &str) -> Result<bool> {
+                Ok(false)
+            }
+            async fn create_network(&self, _name: &str) -> Result<String> {
+                Ok("net-id".into())
+            }
+            async fn remove_network(&self, _name: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn connect_to_network(&self, _id: &str, _net: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn container_ip(&self, _container_id: &str, _network: &str) -> Result<String> {
+                Ok("172.17.0.2".to_string())
+            }
             async fn events(&self) -> Result<EventStream> {
                 Ok(Box::pin(futures::stream::pending()))
             }
@@ -2006,7 +2291,16 @@ mod tests {
         pod.container_id = Some("old-container-123".into());
         store.insert_pod(&pod).await.unwrap();
 
-        let handle = Orchestrator::spawn(Arc::new(MockRuntime), Some(store.clone() as Arc<dyn StateStore>), None, None, None, None, None, None);
+        let handle = Orchestrator::spawn(
+            Arc::new(MockRuntime),
+            Some(store.clone() as Arc<dyn StateStore>),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         let projects = handle.list_projects().await;
@@ -2174,7 +2468,16 @@ mod tests {
 
         // ConfigurableMockRuntime has no knowledge of "vanished-container"
         let runtime = Arc::new(ConfigurableMockRuntime::new());
-        let handle = Orchestrator::spawn(runtime, Some(store.clone() as Arc<dyn StateStore>), None, None, None, None, None, None);
+        let handle = Orchestrator::spawn(
+            runtime,
+            Some(store.clone() as Arc<dyn StateStore>),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         let pods = handle.list_pods(None).await;
@@ -2395,7 +2698,10 @@ mod tests {
         let result = handle.deploy(spec).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("suspended"), "expected suspended error, got: {err_msg}");
+        assert!(
+            err_msg.contains("suspended"),
+            "expected suspended error, got: {err_msg}"
+        );
     }
 
     #[tokio::test]
@@ -2466,7 +2772,10 @@ mod tests {
         let result = handle.delete_project("myapp".into()).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("not empty"), "expected not empty error, got: {err_msg}");
+        assert!(
+            err_msg.contains("not empty"),
+            "expected not empty error, got: {err_msg}"
+        );
     }
 
     #[tokio::test]
@@ -2476,16 +2785,19 @@ mod tests {
         let result = handle.delete_project("ghost".into()).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("not found"), "expected not found error, got: {err_msg}");
+        assert!(
+            err_msg.contains("not found"),
+            "expected not found error, got: {err_msg}"
+        );
     }
 
     // ---- Secret injection tests (Task 7) ----
 
     #[tokio::test]
     async fn deploy_injects_secrets_into_env() {
-        use std::sync::Mutex;
-        use crate::ports::secrets_memory::PlaintextSecretStore;
         use crate::ports::secrets::SecretStore;
+        use crate::ports::secrets_memory::PlaintextSecretStore;
+        use std::sync::Mutex;
 
         struct CapturingRuntime {
             configs: Mutex<Vec<ContainerConfig>>,
@@ -2493,36 +2805,61 @@ mod tests {
 
         #[async_trait::async_trait]
         impl ContainerRuntime for CapturingRuntime {
-            fn runtime_name(&self) -> &'static str { "mock" }
-            async fn pull_image(&self, _image: &str) -> Result<()> { Ok(()) }
+            fn runtime_name(&self) -> &'static str {
+                "mock"
+            }
+            async fn pull_image(&self, _image: &str) -> Result<()> {
+                Ok(())
+            }
             async fn create_container(&self, config: &ContainerConfig) -> Result<String> {
                 self.configs.lock().unwrap().push(config.clone());
                 Ok(format!("mock-{}", config.name))
             }
-            async fn start_container(&self, _id: &str) -> Result<()> { Ok(()) }
-            async fn stop_container(&self, _id: &str, _timeout: u64) -> Result<()> { Ok(()) }
-            async fn remove_container(&self, _id: &str, _force: bool) -> Result<()> { Ok(()) }
+            async fn start_container(&self, _id: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn stop_container(&self, _id: &str, _timeout: u64) -> Result<()> {
+                Ok(())
+            }
+            async fn remove_container(&self, _id: &str, _force: bool) -> Result<()> {
+                Ok(())
+            }
             async fn inspect_container(&self, _id: &str) -> Result<ContainerInfo> {
                 Ok(ContainerInfo {
-                    id: "mock".into(), name: "mock".into(), image: "mock".into(),
+                    id: "mock".into(),
+                    name: "mock".into(),
+                    image: "mock".into(),
                     state: ContainerState::Running,
                 })
             }
             async fn logs(&self, _id: &str, _tail: Option<u64>) -> Result<LogStream> {
                 Ok(Box::pin(futures::stream::empty()))
             }
-            async fn container_exists(&self, _name: &str) -> Result<bool> { Ok(false) }
-            async fn create_network(&self, _name: &str) -> Result<String> { Ok("net-id".into()) }
-            async fn remove_network(&self, _name: &str) -> Result<()> { Ok(()) }
-            async fn connect_to_network(&self, _id: &str, _net: &str) -> Result<()> { Ok(()) }
-            async fn container_ip(&self, _container_id: &str, _network: &str) -> Result<String> { Ok("172.17.0.2".to_string()) }
+            async fn container_exists(&self, _name: &str) -> Result<bool> {
+                Ok(false)
+            }
+            async fn create_network(&self, _name: &str) -> Result<String> {
+                Ok("net-id".into())
+            }
+            async fn remove_network(&self, _name: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn connect_to_network(&self, _id: &str, _net: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn container_ip(&self, _container_id: &str, _network: &str) -> Result<String> {
+                Ok("172.17.0.2".to_string())
+            }
             async fn events(&self) -> Result<EventStream> {
                 Ok(Box::pin(futures::stream::pending()))
             }
         }
 
         let secrets = Arc::new(PlaintextSecretStore::new());
-        secrets.set("myapp", "DB_PASSWORD", b"s3cret").await.unwrap();
+        secrets
+            .set("myapp", "DB_PASSWORD", b"s3cret")
+            .await
+            .unwrap();
 
         let capturing = Arc::new(CapturingRuntime {
             configs: Mutex::new(Vec::new()),
@@ -2563,8 +2900,8 @@ mod tests {
 
     #[tokio::test]
     async fn deploy_fails_on_missing_secret() {
-        use crate::ports::secrets_memory::PlaintextSecretStore;
         use crate::ports::secrets::SecretStore;
+        use crate::ports::secrets_memory::PlaintextSecretStore;
 
         let secrets = Arc::new(PlaintextSecretStore::new());
         let handle = Orchestrator::spawn(
@@ -2658,12 +2995,29 @@ mod tests {
 
     #[async_trait::async_trait]
     impl DnsProvider for SpyDnsProvider {
-        async fn register(&self, project: &str, deployment: &str, ip: std::net::IpAddr) -> Result<()> {
-            self.registered.lock().unwrap().push((project.to_string(), deployment.to_string(), ip));
+        async fn register(
+            &self,
+            project: &str,
+            deployment: &str,
+            ip: std::net::IpAddr,
+        ) -> Result<()> {
+            self.registered
+                .lock()
+                .unwrap()
+                .push((project.to_string(), deployment.to_string(), ip));
             Ok(())
         }
-        async fn deregister(&self, project: &str, deployment: &str, ip: std::net::IpAddr) -> Result<()> {
-            self.deregistered.lock().unwrap().push((project.to_string(), deployment.to_string(), ip));
+        async fn deregister(
+            &self,
+            project: &str,
+            deployment: &str,
+            ip: std::net::IpAddr,
+        ) -> Result<()> {
+            self.deregistered.lock().unwrap().push((
+                project.to_string(),
+                deployment.to_string(),
+                ip,
+            ));
             Ok(())
         }
         async fn lookup(&self, _project: &str, _deployment: &str) -> Result<Vec<std::net::IpAddr>> {
@@ -2705,7 +3059,11 @@ mod tests {
 
         let registered = dns.registered.lock().unwrap();
         assert_eq!(registered.len(), 2, "should register DNS for each pod");
-        assert!(registered.iter().all(|(p, d, _)| p == "ecommerce" && d == "api"));
+        assert!(
+            registered
+                .iter()
+                .all(|(p, d, _)| p == "ecommerce" && d == "api")
+        );
     }
 
     #[tokio::test]
@@ -2788,24 +3146,48 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ProxyBackendTrait for NoopProxyBackend {
-        async fn apply_routes(&self, _: &[PRouteConfig]) -> Result<()> { Ok(()) }
-        async fn remove_route(&self, _: &str) -> Result<()> { Ok(()) }
-        async fn reload(&self) -> Result<()> { Ok(()) }
-        async fn health(&self) -> Result<bool> { Ok(true) }
+        async fn apply_routes(&self, _: &[PRouteConfig]) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_route(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn reload(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn health(&self) -> Result<bool> {
+            Ok(true)
+        }
     }
 
     fn spawn_route_test_orchestrator() -> OrchestratorHandle {
         use crate::ports::route_store_memory::InMemoryRouteStore;
         let proxy: Arc<dyn ProxyBackendTrait> = Arc::new(NoopProxyBackend);
         let route_store: Arc<dyn RouteStore> = Arc::new(InMemoryRouteStore::new());
-        Orchestrator::spawn(Arc::new(MockRuntime), None, None, None, None, None, Some(proxy), Some(route_store))
+        Orchestrator::spawn(
+            Arc::new(MockRuntime),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(proxy),
+            Some(route_store),
+        )
     }
 
     #[tokio::test]
     async fn add_and_list_routes() {
         let handle = spawn_route_test_orchestrator();
-        handle.add_route("api.example.com".into(), "ecommerce".into(), "api".into(), "auto".into())
-            .await.unwrap();
+        handle
+            .add_route(
+                "api.example.com".into(),
+                "ecommerce".into(),
+                "api".into(),
+                "auto".into(),
+            )
+            .await
+            .unwrap();
 
         let routes = handle.list_routes(None).await;
         assert_eq!(routes.len(), 1);
@@ -2816,8 +3198,15 @@ mod tests {
     #[tokio::test]
     async fn remove_route() {
         let handle = spawn_route_test_orchestrator();
-        handle.add_route("api.example.com".into(), "ecommerce".into(), "api".into(), "none".into())
-            .await.unwrap();
+        handle
+            .add_route(
+                "api.example.com".into(),
+                "ecommerce".into(),
+                "api".into(),
+                "none".into(),
+            )
+            .await
+            .unwrap();
 
         handle.remove_route("api.example.com".into()).await.unwrap();
         let routes = handle.list_routes(None).await;
@@ -2834,8 +3223,24 @@ mod tests {
     #[tokio::test]
     async fn list_routes_filter_by_project() {
         let handle = spawn_route_test_orchestrator();
-        handle.add_route("a.example.com".into(), "proj-a".into(), "api".into(), "none".into()).await.unwrap();
-        handle.add_route("b.example.com".into(), "proj-b".into(), "web".into(), "auto".into()).await.unwrap();
+        handle
+            .add_route(
+                "a.example.com".into(),
+                "proj-a".into(),
+                "api".into(),
+                "none".into(),
+            )
+            .await
+            .unwrap();
+        handle
+            .add_route(
+                "b.example.com".into(),
+                "proj-b".into(),
+                "web".into(),
+                "auto".into(),
+            )
+            .await
+            .unwrap();
 
         let proj_a = handle.list_routes(Some("proj-a".into())).await;
         assert_eq!(proj_a.len(), 1);
@@ -2845,8 +3250,23 @@ mod tests {
     #[tokio::test]
     async fn add_duplicate_route_fails() {
         let handle = spawn_route_test_orchestrator();
-        handle.add_route("api.example.com".into(), "p".into(), "d".into(), "none".into()).await.unwrap();
-        let result = handle.add_route("api.example.com".into(), "p".into(), "d".into(), "none".into()).await;
+        handle
+            .add_route(
+                "api.example.com".into(),
+                "p".into(),
+                "d".into(),
+                "none".into(),
+            )
+            .await
+            .unwrap();
+        let result = handle
+            .add_route(
+                "api.example.com".into(),
+                "p".into(),
+                "d".into(),
+                "none".into(),
+            )
+            .await;
         assert!(result.is_err());
     }
 }

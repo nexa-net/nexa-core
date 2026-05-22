@@ -102,13 +102,7 @@ mod tests {
 
     #[test]
     fn new_pod_has_zero_restart_count() {
-        let pod = Pod::new(
-            Uuid::new_v4(),
-            "proj",
-            "deploy",
-            0,
-            "nginx:latest",
-        );
+        let pod = Pod::new(Uuid::new_v4(), "proj", "deploy", 0, "nginx:latest");
         assert_eq!(pod.restart_count, 0);
     }
 

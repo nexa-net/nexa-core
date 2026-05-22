@@ -85,13 +85,28 @@ impl HealthTracker {
 
         let (new_state, trigger_restart) = match (current, healthy) {
             (HealthState::Healthy, true) => (HealthState::Healthy, false),
-            (HealthState::Healthy, false) => (HealthState::Failing { consecutive_failures: 1 }, false),
+            (HealthState::Healthy, false) => (
+                HealthState::Failing {
+                    consecutive_failures: 1,
+                },
+                false,
+            ),
             (HealthState::Failing { .. }, true) => (HealthState::Healthy, false),
-            (HealthState::Failing { consecutive_failures: n }, false) => {
+            (
+                HealthState::Failing {
+                    consecutive_failures: n,
+                },
+                false,
+            ) => {
                 if n + 1 >= retries {
                     (HealthState::Unhealthy, true)
                 } else {
-                    (HealthState::Failing { consecutive_failures: n + 1 }, false)
+                    (
+                        HealthState::Failing {
+                            consecutive_failures: n + 1,
+                        },
+                        false,
+                    )
                 }
             }
             (HealthState::Unhealthy, _) => (HealthState::Unhealthy, false),
@@ -153,7 +168,12 @@ mod tests {
         let id = Uuid::new_v4();
         tracker.register(make_config(id, 3, Duration::from_secs(10)));
         let (state, restart) = tracker.record_result(&id, false).unwrap();
-        assert_eq!(state, HealthState::Failing { consecutive_failures: 1 });
+        assert_eq!(
+            state,
+            HealthState::Failing {
+                consecutive_failures: 1
+            }
+        );
         assert!(!restart);
     }
 
@@ -164,7 +184,12 @@ mod tests {
         tracker.register(make_config(id, 5, Duration::from_secs(10)));
         tracker.record_result(&id, false).unwrap();
         let (state, restart) = tracker.record_result(&id, false).unwrap();
-        assert_eq!(state, HealthState::Failing { consecutive_failures: 2 });
+        assert_eq!(
+            state,
+            HealthState::Failing {
+                consecutive_failures: 2
+            }
+        );
         assert!(!restart);
     }
 

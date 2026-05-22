@@ -44,9 +44,7 @@ fn validate_spec(spec: &DeploymentSpec) -> Result<()> {
         return Err(NexaError::InvalidSpec("image is required".into()));
     }
     if spec.replicas == 0 {
-        return Err(NexaError::InvalidSpec(
-            "replicas must be at least 1".into(),
-        ));
+        return Err(NexaError::InvalidSpec("replicas must be at least 1".into()));
     }
 
     for &port in &spec.ports {

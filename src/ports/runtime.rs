@@ -60,9 +60,16 @@ pub type EventStream = Pin<Box<dyn Stream<Item = RuntimeEvent> + Send>>;
 
 #[derive(Debug, Clone)]
 pub enum RuntimeEvent {
-    ContainerDied { container_id: String, exit_code: i64 },
-    ContainerStarted { container_id: String },
-    ContainerOom { container_id: String },
+    ContainerDied {
+        container_id: String,
+        exit_code: i64,
+    },
+    ContainerStarted {
+        container_id: String,
+    },
+    ContainerOom {
+        container_id: String,
+    },
 }
 
 #[async_trait]
@@ -89,9 +96,16 @@ mod tests {
 
     #[test]
     fn runtime_event_variants_exist() {
-        let died = RuntimeEvent::ContainerDied { container_id: "abc123".into(), exit_code: 137 };
-        let started = RuntimeEvent::ContainerStarted { container_id: "abc123".into() };
-        let oom = RuntimeEvent::ContainerOom { container_id: "abc123".into() };
+        let died = RuntimeEvent::ContainerDied {
+            container_id: "abc123".into(),
+            exit_code: 137,
+        };
+        let started = RuntimeEvent::ContainerStarted {
+            container_id: "abc123".into(),
+        };
+        let oom = RuntimeEvent::ContainerOom {
+            container_id: "abc123".into(),
+        };
         let _ = format!("{died:?}");
         let _ = format!("{started:?}");
         let _ = format!("{oom:?}");

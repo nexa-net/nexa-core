@@ -48,10 +48,18 @@ mod tests {
         let config = RouteConfig {
             domain: "api.example.com".into(),
             upstream: vec![
-                Upstream { address: "10.0.0.1:3000".into(), weight: 1 },
-                Upstream { address: "10.0.0.2:3000".into(), weight: 1 },
+                Upstream {
+                    address: "10.0.0.1:3000".into(),
+                    weight: 1,
+                },
+                Upstream {
+                    address: "10.0.0.2:3000".into(),
+                    weight: 1,
+                },
             ],
-            tls: TlsConfig::Auto { email: "admin@example.com".into() },
+            tls: TlsConfig::Auto {
+                email: "admin@example.com".into(),
+            },
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("api.example.com"));
@@ -79,7 +87,10 @@ mod tests {
 
     #[test]
     fn upstream_default_weight() {
-        let up = Upstream { address: "10.0.0.1:8080".into(), weight: 1 };
+        let up = Upstream {
+            address: "10.0.0.1:8080".into(),
+            weight: 1,
+        };
         assert_eq!(up.weight, 1);
     }
 

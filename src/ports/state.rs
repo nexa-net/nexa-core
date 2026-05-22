@@ -1,9 +1,7 @@
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::domain::models::{
-    Deployment, Node, Pod, Project, ProjectStatus,
-};
+use crate::domain::models::{Deployment, Node, Pod, Project, ProjectStatus};
 use crate::error::Result;
 
 #[async_trait]

@@ -3,8 +3,8 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use crate::error::Result;
 use super::secrets::SecretStore;
+use crate::error::Result;
 
 pub struct PlaintextSecretStore {
     data: Mutex<HashMap<(String, String), Vec<u8>>>,

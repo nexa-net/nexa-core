@@ -16,7 +16,11 @@ pub trait RouteStore: Send + Sync {
     async fn delete_certificate(&self, domain: &str) -> Result<bool>;
 
     async fn allocate_subnet(&self, alloc: &SubnetAllocation) -> Result<()>;
-    async fn get_node_subnet(&self, node_id: &str, project: &str) -> Result<Option<SubnetAllocation>>;
+    async fn get_node_subnet(
+        &self,
+        node_id: &str,
+        project: &str,
+    ) -> Result<Option<SubnetAllocation>>;
     async fn list_subnets(&self) -> Result<Vec<SubnetAllocation>>;
     async fn deallocate_subnet(&self, node_id: &str, project: &str) -> Result<bool>;
 }
