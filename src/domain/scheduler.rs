@@ -294,4 +294,150 @@ mod tests {
         let score = scheduler.score_node(&req, &node);
         assert!((score - 0.70).abs() < 1e-6, "score = {score}");
     }
+
+    // ── Task 4 tests: select_node ──
+
+    #[test]
+    fn select_node_picks_highest_score() {
+        let scheduler = WeightedScheduler::new(SchedulerWeights::spread());
+        let req = PodRequest { cpu_request: 0.5, memory_request: 512_000_000 };
+        let idle_node = make_node(4.0, 4.0, 8_000_000_000, 8_000_000_000, 0, 100);
+        let busy_node = make_node(1.0, 4.0, 2_000_000_000, 8_000_000_000, 80, 100);
+        let idle_id = idle_node.node_id;
+        let nodes = vec![busy_node, idle_node];
+        let selected = scheduler.select_node(&req, &nodes).unwrap();
+        assert_eq!(selected, idle_id);
+    }
+
+    #[test]
+    fn select_node_skips_insufficient_nodes() {
+        let scheduler = WeightedScheduler::new(SchedulerWeights::spread());
+        let req = PodRequest { cpu_request: 2.0, memory_request: 0 };
+        let small = make_node(1.0, 2.0, 8_000_000_000, 8_000_000_000, 0, 100);
+        let big = make_node(4.0, 8.0, 8_000_000_000, 8_000_000_000, 0, 100);
+        let big_id = big.node_id;
+        let nodes = vec![small, big];
+        let selected = scheduler.select_node(&req, &nodes).unwrap();
+        assert_eq!(selected, big_id);
+    }
+
+    #[test]
+    fn select_node_empty_list_returns_error() {
+        let scheduler = WeightedScheduler::new(SchedulerWeights::spread());
+        let req = PodRequest::default();
+        let result = scheduler.select_node(&req, &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn select_node_all_nodes_insufficient_returns_error() {
+        let scheduler = WeightedScheduler::new(SchedulerWeights::spread());
+        let req = PodRequest { cpu_request: 8.0, memory_request: 0 };
+        let n1 = make_node(2.0, 4.0, 8_000_000_000, 8_000_000_000, 0, 100);
+        let n2 = make_node(1.0, 4.0, 8_000_000_000, 8_000_000_000, 0, 100);
+        let result = scheduler.select_node(&req, &[n1, n2]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn select_node_prefers_node_without_failures() {
+        let scheduler = WeightedScheduler::new(SchedulerWeights::spread());
+        let req = PodRequest::default();
+        let clean = make_node(4.0, 4.0, 8_000_000_000, 8_000_000_000, 0, 100);
+        let clean_id = clean.node_id;
+        let mut failed = make_node(4.0, 4.0, 8_000_000_000, 8_000_000_000, 0, 100);
+        failed.recent_failures = vec![Utc::now()];
+        let nodes = vec![failed, clean];
+        let selected = scheduler.select_node(&req, &nodes).unwrap();
+        assert_eq!(selected, clean_id);
+    }
+
+    #[test]
+    fn select_node_single_node_returns_it() {
+        let scheduler = WeightedScheduler::new(SchedulerWeights::spread());
+        let req = PodRequest::default();
+        let node = make_node(4.0, 4.0, 8_000_000_000, 8_000_000_000, 0, 100);
+        let node_id = node.node_id;
+        let selected = scheduler.select_node(&req, &[node]).unwrap();
+        assert_eq!(selected, node_id);
+    }
+
+    #[test]
+    fn select_node_three_nodes_picks_best() {
+        let scheduler = WeightedScheduler::new(SchedulerWeights::spread());
+        let req = PodRequest { cpu_request: 1.0, memory_request: 1_000_000_000 };
+        let n1 = make_node(2.0, 4.0, 4_000_000_000, 8_000_000_000, 50, 100);
+        let n2 = make_node(4.0, 4.0, 8_000_000_000, 8_000_000_000, 10, 100);
+        let n3 = make_node(3.0, 4.0, 6_000_000_000, 8_000_000_000, 30, 100);
+        let best_id = n2.node_id;
+        let nodes = vec![n1, n2, n3];
+        let selected = scheduler.select_node(&req, &nodes).unwrap();
+        assert_eq!(selected, best_id);
+    }
+
+    // ── Task 5 tests: binpack mode ──
+
+    #[test]
+    fn binpack_prefers_busy_node() {
+        let scheduler = WeightedScheduler::new(SchedulerWeights::binpack());
+        let req = PodRequest { cpu_request: 0.5, memory_request: 512_000_000 };
+        let idle = make_node(4.0, 4.0, 8_000_000_000, 8_000_000_000, 5, 100);
+        let busy = make_node(2.0, 4.0, 3_000_000_000, 8_000_000_000, 60, 100);
+        let busy_id = busy.node_id;
+        let nodes = vec![idle, busy];
+        let selected = scheduler.select_node(&req, &nodes).unwrap();
+        assert_eq!(selected, busy_id);
+    }
+
+    #[test]
+    fn binpack_still_rejects_insufficient_resources() {
+        let scheduler = WeightedScheduler::new(SchedulerWeights::binpack());
+        let req = PodRequest { cpu_request: 3.0, memory_request: 0 };
+        let busy = make_node(1.0, 4.0, 8_000_000_000, 8_000_000_000, 60, 100);
+        let idle = make_node(4.0, 4.0, 8_000_000_000, 8_000_000_000, 5, 100);
+        let idle_id = idle.node_id;
+        let nodes = vec![busy, idle];
+        let selected = scheduler.select_node(&req, &nodes).unwrap();
+        assert_eq!(selected, idle_id);
+    }
+
+    #[test]
+    fn binpack_score_lower_for_idle_node() {
+        let scheduler = WeightedScheduler::new(SchedulerWeights::binpack());
+        let req = PodRequest::default();
+        let idle = make_node(4.0, 4.0, 8_000_000_000, 8_000_000_000, 0, 100);
+        let busy = make_node(1.0, 4.0, 2_000_000_000, 8_000_000_000, 70, 100);
+        let idle_score = scheduler.score_node(&req, &idle);
+        let busy_score = scheduler.score_node(&req, &busy);
+        assert!(busy_score > idle_score, "binpack should prefer busy: idle={idle_score}, busy={busy_score}");
+    }
+
+    #[test]
+    fn binpack_still_penalizes_failures() {
+        let scheduler = WeightedScheduler::new(SchedulerWeights::binpack());
+        let req = PodRequest::default();
+        let clean = make_node(1.0, 4.0, 2_000_000_000, 8_000_000_000, 70, 100);
+        let clean_id = clean.node_id;
+        let mut failed = make_node(1.0, 4.0, 2_000_000_000, 8_000_000_000, 70, 100);
+        failed.recent_failures = vec![Utc::now()];
+        let nodes = vec![failed, clean];
+        let selected = scheduler.select_node(&req, &nodes).unwrap();
+        assert_eq!(selected, clean_id);
+    }
+
+    #[test]
+    fn spread_and_binpack_pick_opposite_nodes() {
+        let req = PodRequest { cpu_request: 0.5, memory_request: 512_000_000 };
+        let idle = make_node(4.0, 4.0, 8_000_000_000, 8_000_000_000, 5, 100);
+        let busy = make_node(2.0, 4.0, 3_000_000_000, 8_000_000_000, 60, 100);
+        let idle_id = idle.node_id;
+        let busy_id = busy.node_id;
+        let spread = WeightedScheduler::new(SchedulerWeights::spread());
+        let binpack = WeightedScheduler::new(SchedulerWeights::binpack());
+        let nodes = vec![idle.clone(), busy.clone()];
+        let spread_pick = spread.select_node(&req, &nodes).unwrap();
+        let binpack_pick = binpack.select_node(&req, &nodes).unwrap();
+        assert_eq!(spread_pick, idle_id, "spread should pick idle");
+        assert_eq!(binpack_pick, busy_id, "binpack should pick busy");
+    }
 }
