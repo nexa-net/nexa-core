@@ -125,6 +125,55 @@ impl WeightedScheduler {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchedulerConfig {
+    pub strategy: String,
+    pub weights: SchedulerWeights,
+}
+
+impl SchedulerConfig {
+    pub fn from_strategy(strategy: &str) -> Result<Self> {
+        let weights = match strategy {
+            "spread" => SchedulerWeights::spread(),
+            "binpack" => SchedulerWeights::binpack(),
+            _ => {
+                return Err(NexaError::InvalidSpec(format!(
+                    "unknown scheduler strategy: '{strategy}'. Valid: spread, binpack"
+                )));
+            }
+        };
+        Ok(Self {
+            strategy: strategy.to_string(),
+            weights,
+        })
+    }
+
+    pub fn set_weight(&mut self, name: &str, value: f64) -> Result<()> {
+        match name {
+            "cpu" => self.weights.cpu = value,
+            "memory" => self.weights.memory = value,
+            "load" => self.weights.load = value,
+            "failure" => self.weights.failure = value,
+            _ => {
+                return Err(NexaError::InvalidSpec(format!(
+                    "unknown weight: '{name}'. Valid: cpu, memory, load, failure"
+                )));
+            }
+        }
+        self.strategy = "custom".to_string();
+        Ok(())
+    }
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            strategy: "spread".to_string(),
+            weights: SchedulerWeights::spread(),
+        }
+    }
+}
+
 pub fn parse_memory(s: &str) -> u64 {
     let s = s.trim();
     if s.is_empty() {
@@ -477,5 +526,40 @@ mod tests {
     #[test]
     fn parse_memory_bytes() {
         assert_eq!(parse_memory("1048576"), 1_048_576);
+    }
+
+    #[test]
+    fn scheduler_config_from_strategy_spread() {
+        let config = SchedulerConfig::from_strategy("spread").unwrap();
+        assert_eq!(config.strategy, "spread");
+        assert_eq!(config.weights, SchedulerWeights::spread());
+    }
+
+    #[test]
+    fn scheduler_config_from_strategy_binpack() {
+        let config = SchedulerConfig::from_strategy("binpack").unwrap();
+        assert_eq!(config.strategy, "binpack");
+        assert_eq!(config.weights, SchedulerWeights::binpack());
+    }
+
+    #[test]
+    fn scheduler_config_from_strategy_invalid() {
+        let result = SchedulerConfig::from_strategy("random");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn scheduler_config_with_custom_weight() {
+        let mut config = SchedulerConfig::from_strategy("spread").unwrap();
+        config.set_weight("cpu", 0.5).unwrap();
+        assert_eq!(config.weights.cpu, 0.5);
+        assert_eq!(config.strategy, "custom");
+    }
+
+    #[test]
+    fn scheduler_config_set_invalid_weight_name() {
+        let mut config = SchedulerConfig::from_strategy("spread").unwrap();
+        let result = config.set_weight("disk", 0.5);
+        assert!(result.is_err());
     }
 }

@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::domain::models::*;
 use crate::domain::health::{HealthTracker, HealthState, PodHealthConfig};
 use crate::domain::restart::{self, RestartState};
-use crate::domain::scheduler::{NodeSnapshot, PodRequest, SchedulerWeights, WeightedScheduler, parse_memory};
+use crate::domain::scheduler::{NodeSnapshot, PodRequest, SchedulerConfig, SchedulerWeights, WeightedScheduler, parse_memory};
 use crate::error::{NexaError, Result};
 use crate::ports::cluster::ClusterTransport;
 use crate::ports::runtime::{ContainerConfig, ContainerRuntime, LogStream};
@@ -97,6 +97,13 @@ pub enum Command {
         project: String,
         name: String,
         reply: oneshot::Sender<Result<()>>,
+    },
+    GetSchedulerConfig {
+        reply: oneshot::Sender<SchedulerConfig>,
+    },
+    SetSchedulerConfig {
+        config: SchedulerConfig,
+        reply: oneshot::Sender<Result<SchedulerConfig>>,
     },
 }
 
@@ -258,6 +265,22 @@ impl OrchestratorHandle {
             .map_err(|_| NexaError::Runtime("orchestrator dropped reply".into()))?
     }
 
+    pub async fn get_scheduler_config(&self) -> SchedulerConfig {
+        let (reply, rx) = oneshot::channel();
+        let _ = self.tx.send(Command::GetSchedulerConfig { reply }).await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn set_scheduler_config(&self, config: SchedulerConfig) -> Result<SchedulerConfig> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::SetSchedulerConfig { config, reply })
+            .await
+            .map_err(|_| NexaError::Runtime("orchestrator stopped".into()))?;
+        rx.await
+            .map_err(|_| NexaError::Runtime("orchestrator dropped reply".into()))?
+    }
+
     pub fn command_sender(&self) -> mpsc::Sender<Command> {
         self.tx.clone()
     }
@@ -269,6 +292,7 @@ pub struct Orchestrator {
     secret_store: Option<Arc<dyn SecretStore>>,
     transport: Option<Arc<dyn ClusterTransport>>,
     scheduler: WeightedScheduler,
+    scheduler_strategy: String,
     health_tracker: HealthTracker,
     projects: StdHashMap<String, Project>,
     deployments: StdHashMap<Uuid, Deployment>,
@@ -293,6 +317,7 @@ impl Orchestrator {
                 secret_store,
                 transport,
                 scheduler: WeightedScheduler::new(SchedulerWeights::default()),
+                scheduler_strategy: "spread".to_string(),
                 health_tracker: HealthTracker::new(),
                 projects: StdHashMap::new(),
                 deployments: StdHashMap::new(),
@@ -378,6 +403,12 @@ impl Orchestrator {
                 Command::DeleteSecret { project, name, reply } => {
                     let result = self.handle_delete_secret(&project, &name).await;
                     let _ = reply.send(result);
+                }
+                Command::GetSchedulerConfig { reply } => {
+                    let _ = reply.send(self.handle_get_scheduler_config());
+                }
+                Command::SetSchedulerConfig { config, reply } => {
+                    let _ = reply.send(self.handle_set_scheduler_config(config));
                 }
             }
         }
@@ -1286,6 +1317,21 @@ impl Orchestrator {
             Some(store) => store.delete(project, name).await,
             None => Err(NexaError::Secret("no secret store configured".into())),
         }
+    }
+
+    // ---- Scheduler config handlers ----
+
+    fn handle_get_scheduler_config(&self) -> SchedulerConfig {
+        SchedulerConfig {
+            strategy: self.scheduler_strategy.clone(),
+            weights: self.scheduler.weights().clone(),
+        }
+    }
+
+    fn handle_set_scheduler_config(&mut self, config: SchedulerConfig) -> Result<SchedulerConfig> {
+        self.scheduler = WeightedScheduler::new(config.weights.clone());
+        self.scheduler_strategy = config.strategy.clone();
+        Ok(config)
     }
 
     // ---- Persistence helpers ----
