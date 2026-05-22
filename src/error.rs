@@ -49,6 +49,9 @@ pub enum NexaError {
 
     #[error("yaml error: {0}")]
     Yaml(#[from] serde_yaml::Error),
+
+    #[error("scheduling failed: {0}")]
+    SchedulingFailed(String),
 }
 
 pub type Result<T> = std::result::Result<T, NexaError>;
