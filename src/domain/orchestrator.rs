@@ -948,6 +948,7 @@ impl Orchestrator {
         ContainerConfig {
             name: container_name.to_string(),
             image: spec.image.clone(),
+            command: vec![],
             env: env.clone(),
             ports,
             volumes: spec

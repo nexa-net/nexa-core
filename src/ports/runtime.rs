@@ -11,6 +11,7 @@ use crate::error::Result;
 pub struct ContainerConfig {
     pub name: String,
     pub image: String,
+    pub command: Vec<String>,
     pub env: HashMap<String, String>,
     pub ports: Vec<PortBinding>,
     pub volumes: Vec<VolumeBinding>,
@@ -116,6 +117,7 @@ mod tests {
         let config = ContainerConfig {
             name: "test".into(),
             image: "nginx".into(),
+            command: vec![],
             env: HashMap::new(),
             ports: vec![],
             volumes: vec![],
