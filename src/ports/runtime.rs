@@ -67,6 +67,7 @@ pub enum RuntimeEvent {
 
 #[async_trait]
 pub trait ContainerRuntime: Send + Sync {
+    fn runtime_name(&self) -> &'static str;
     async fn pull_image(&self, image: &str) -> Result<()>;
     async fn create_container(&self, config: &ContainerConfig) -> Result<String>;
     async fn start_container(&self, id: &str) -> Result<()>;
