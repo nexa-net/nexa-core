@@ -52,6 +52,9 @@ pub enum NexaError {
 
     #[error("scheduling failed: {0}")]
     SchedulingFailed(String),
+
+    #[error("dns error: {0}")]
+    Dns(String),
 }
 
 pub type Result<T> = std::result::Result<T, NexaError>;
