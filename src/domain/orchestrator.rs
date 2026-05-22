@@ -13,6 +13,8 @@ use crate::ports::cluster::ClusterTransport;
 use crate::ports::runtime::{ContainerConfig, ContainerRuntime, LogStream};
 use crate::ports::secrets::SecretStore;
 use crate::ports::dns::DnsProvider;
+use crate::ports::proxy::{ProxyBackend, RouteConfig, TlsConfig as ProxyTlsConfig, Upstream as ProxyUpstream};
+use crate::ports::route_store::RouteStore;
 use crate::ports::state::StateStore;
 use crate::ports::runtime::ContainerState;
 
@@ -105,6 +107,21 @@ pub enum Command {
     SetSchedulerConfig {
         config: SchedulerConfig,
         reply: oneshot::Sender<Result<SchedulerConfig>>,
+    },
+    AddRoute {
+        domain: String,
+        project: String,
+        deployment: String,
+        tls_mode: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    RemoveRoute {
+        domain: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    ListRoutes {
+        project: Option<String>,
+        reply: oneshot::Sender<Vec<Route>>,
     },
 }
 
@@ -282,6 +299,38 @@ impl OrchestratorHandle {
             .map_err(|_| NexaError::Runtime("orchestrator dropped reply".into()))?
     }
 
+    pub async fn add_route(
+        &self,
+        domain: String,
+        project: String,
+        deployment: String,
+        tls_mode: String,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::AddRoute { domain, project, deployment, tls_mode, reply })
+            .await
+            .map_err(|_| NexaError::Runtime("orchestrator stopped".into()))?;
+        rx.await
+            .map_err(|_| NexaError::Runtime("orchestrator dropped reply".into()))?
+    }
+
+    pub async fn remove_route(&self, domain: String) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::RemoveRoute { domain, reply })
+            .await
+            .map_err(|_| NexaError::Runtime("orchestrator stopped".into()))?;
+        rx.await
+            .map_err(|_| NexaError::Runtime("orchestrator dropped reply".into()))?
+    }
+
+    pub async fn list_routes(&self, project: Option<String>) -> Vec<Route> {
+        let (reply, rx) = oneshot::channel();
+        let _ = self.tx.send(Command::ListRoutes { project, reply }).await;
+        rx.await.unwrap_or_default()
+    }
+
     pub fn command_sender(&self) -> mpsc::Sender<Command> {
         self.tx.clone()
     }
@@ -301,6 +350,8 @@ pub struct Orchestrator {
     restart_states: StdHashMap<Uuid, RestartState>,
     dns: Option<Arc<dyn DnsProvider>>,
     master_ip: Option<String>,
+    proxy: Option<Arc<dyn ProxyBackend>>,
+    route_store: Option<Arc<dyn RouteStore>>,
     tx: mpsc::Sender<Command>,
 }
 
@@ -312,6 +363,8 @@ impl Orchestrator {
         transport: Option<Arc<dyn ClusterTransport>>,
         dns: Option<Arc<dyn DnsProvider>>,
         master_ip: Option<String>,
+        proxy: Option<Arc<dyn ProxyBackend>>,
+        route_store: Option<Arc<dyn RouteStore>>,
     ) -> OrchestratorHandle {
         let (tx, rx) = mpsc::channel(256);
         let tx_clone = tx.clone();
@@ -330,6 +383,8 @@ impl Orchestrator {
                 restart_states: StdHashMap::new(),
                 dns,
                 master_ip,
+                proxy,
+                route_store,
                 tx: tx_clone,
             };
             orch.run(rx).await;
@@ -416,6 +471,18 @@ impl Orchestrator {
                 }
                 Command::SetSchedulerConfig { config, reply } => {
                     let _ = reply.send(self.handle_set_scheduler_config(config));
+                }
+                Command::AddRoute { domain, project, deployment, tls_mode, reply } => {
+                    let result = self.handle_add_route(&domain, &project, &deployment, &tls_mode).await;
+                    let _ = reply.send(result);
+                }
+                Command::RemoveRoute { domain, reply } => {
+                    let result = self.handle_remove_route(&domain).await;
+                    let _ = reply.send(result);
+                }
+                Command::ListRoutes { project, reply } => {
+                    let routes = self.handle_list_routes(project.as_deref()).await;
+                    let _ = reply.send(routes);
                 }
             }
         }
@@ -1379,6 +1446,83 @@ impl Orchestrator {
         Ok(config)
     }
 
+    // ---- Route command handlers ----
+
+    async fn handle_add_route(
+        &mut self,
+        domain: &str,
+        project: &str,
+        deployment: &str,
+        tls_mode_str: &str,
+    ) -> Result<()> {
+        let tls_mode: TlsMode = tls_mode_str
+            .parse()
+            .map_err(|e: String| NexaError::InvalidSpec(format!("invalid TLS mode: {e}")))?;
+
+        let route = Route::new(domain, project, deployment, tls_mode.clone());
+
+        if let Some(store) = &self.route_store {
+            store.insert_route(&route).await?;
+        }
+
+        if let Some(proxy) = &self.proxy {
+            let upstreams: Vec<ProxyUpstream> = self
+                .pods
+                .values()
+                .filter(|p| p.project == project && p.deployment_name == deployment)
+                .filter_map(|p| {
+                    p.container_ip.as_ref().map(|ip| ProxyUpstream {
+                        address: format!("{ip}:80"),
+                        weight: 1,
+                    })
+                })
+                .collect();
+
+            let tls_config = match tls_mode {
+                TlsMode::None => ProxyTlsConfig::None,
+                TlsMode::Auto => ProxyTlsConfig::Auto { email: String::new() },
+                TlsMode::Manual => ProxyTlsConfig::None,
+            };
+
+            let route_config = RouteConfig {
+                domain: domain.to_string(),
+                upstream: upstreams,
+                tls: tls_config,
+            };
+
+            proxy.apply_routes(&[route_config]).await?;
+            proxy.reload().await?;
+        }
+
+        tracing::info!(domain, project, deployment, "route added");
+        Ok(())
+    }
+
+    async fn handle_remove_route(&mut self, domain: &str) -> Result<()> {
+        if let Some(store) = &self.route_store {
+            let deleted = store.delete_route(domain).await?;
+            if !deleted {
+                return Err(NexaError::RouteNotFound(domain.to_string()));
+            }
+        }
+
+        if let Some(proxy) = &self.proxy {
+            proxy.remove_route(domain).await?;
+            proxy.reload().await?;
+        }
+
+        tracing::info!(domain, "route removed");
+        Ok(())
+    }
+
+    async fn handle_list_routes(&self, project: Option<&str>) -> Vec<Route> {
+        if let Some(store) = &self.route_store {
+            store.list_routes(project).await.unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    }
+
     // ---- Persistence helpers ----
 
     async fn persist_insert_project(&self, project: &Project) {
@@ -1511,12 +1655,12 @@ mod tests {
     }
 
     fn spawn_test_orchestrator() -> OrchestratorHandle {
-        Orchestrator::spawn(Arc::new(MockRuntime), None, None, None, None, None)
+        Orchestrator::spawn(Arc::new(MockRuntime), None, None, None, None, None, None, None)
     }
 
     fn spawn_persisted_test_orchestrator() -> (OrchestratorHandle, Arc<InMemoryStore>) {
         let store = Arc::new(InMemoryStore::new());
-        let handle = Orchestrator::spawn(Arc::new(MockRuntime), Some(store.clone() as Arc<dyn StateStore>), None, None, None, None);
+        let handle = Orchestrator::spawn(Arc::new(MockRuntime), Some(store.clone() as Arc<dyn StateStore>), None, None, None, None, None, None);
         (handle, store)
     }
 
@@ -1697,7 +1841,7 @@ mod tests {
         let runtime = Arc::new(CapturingRuntime {
             configs: Mutex::new(Vec::new()),
         });
-        let handle = Orchestrator::spawn(runtime.clone(), None, None, None, None, None);
+        let handle = Orchestrator::spawn(runtime.clone(), None, None, None, None, None, None, None);
 
         let spec = DeploymentSpec {
             project: "test".into(),
@@ -1859,7 +2003,7 @@ mod tests {
         pod.container_id = Some("old-container-123".into());
         store.insert_pod(&pod).await.unwrap();
 
-        let handle = Orchestrator::spawn(Arc::new(MockRuntime), Some(store.clone() as Arc<dyn StateStore>), None, None, None, None);
+        let handle = Orchestrator::spawn(Arc::new(MockRuntime), Some(store.clone() as Arc<dyn StateStore>), None, None, None, None, None, None);
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         let projects = handle.list_projects().await;
@@ -2027,7 +2171,7 @@ mod tests {
 
         // ConfigurableMockRuntime has no knowledge of "vanished-container"
         let runtime = Arc::new(ConfigurableMockRuntime::new());
-        let handle = Orchestrator::spawn(runtime, Some(store.clone() as Arc<dyn StateStore>), None, None, None, None);
+        let handle = Orchestrator::spawn(runtime, Some(store.clone() as Arc<dyn StateStore>), None, None, None, None, None, None);
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         let pods = handle.list_pods(None).await;
@@ -2386,6 +2530,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         );
 
         let spec = DeploymentSpec {
@@ -2421,6 +2567,8 @@ mod tests {
             Arc::new(MockRuntime),
             None,
             Some(secrets as Arc<dyn SecretStore>),
+            None,
+            None,
             None,
             None,
             None,
@@ -2529,6 +2677,8 @@ mod tests {
             None,
             Some(dns.clone() as Arc<dyn DnsProvider>),
             None,
+            None,
+            None,
         );
 
         let spec = DeploymentSpec {
@@ -2563,6 +2713,8 @@ mod tests {
             None,
             None,
             Some(dns.clone() as Arc<dyn DnsProvider>),
+            None,
+            None,
             None,
         );
 
@@ -2600,6 +2752,8 @@ mod tests {
             None,
             None,
             Some("10.0.0.100".into()),
+            None,
+            None,
         );
 
         let spec = DeploymentSpec {
@@ -2619,5 +2773,76 @@ mod tests {
 
         let deployment = handle.deploy(spec).await.unwrap();
         assert_eq!(deployment.name(), "api");
+    }
+
+    // ---- Route command tests ----
+
+    use crate::ports::proxy::{ProxyBackend as ProxyBackendTrait, RouteConfig as PRouteConfig};
+    use crate::ports::route_store::RouteStore;
+
+    struct NoopProxyBackend;
+
+    #[async_trait::async_trait]
+    impl ProxyBackendTrait for NoopProxyBackend {
+        async fn apply_routes(&self, _: &[PRouteConfig]) -> Result<()> { Ok(()) }
+        async fn remove_route(&self, _: &str) -> Result<()> { Ok(()) }
+        async fn reload(&self) -> Result<()> { Ok(()) }
+        async fn health(&self) -> Result<bool> { Ok(true) }
+    }
+
+    fn spawn_route_test_orchestrator() -> OrchestratorHandle {
+        use crate::ports::route_store_memory::InMemoryRouteStore;
+        let proxy: Arc<dyn ProxyBackendTrait> = Arc::new(NoopProxyBackend);
+        let route_store: Arc<dyn RouteStore> = Arc::new(InMemoryRouteStore::new());
+        Orchestrator::spawn(Arc::new(MockRuntime), None, None, None, None, None, Some(proxy), Some(route_store))
+    }
+
+    #[tokio::test]
+    async fn add_and_list_routes() {
+        let handle = spawn_route_test_orchestrator();
+        handle.add_route("api.example.com".into(), "ecommerce".into(), "api".into(), "auto".into())
+            .await.unwrap();
+
+        let routes = handle.list_routes(None).await;
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].domain, "api.example.com");
+        assert_eq!(routes[0].tls_mode, TlsMode::Auto);
+    }
+
+    #[tokio::test]
+    async fn remove_route() {
+        let handle = spawn_route_test_orchestrator();
+        handle.add_route("api.example.com".into(), "ecommerce".into(), "api".into(), "none".into())
+            .await.unwrap();
+
+        handle.remove_route("api.example.com".into()).await.unwrap();
+        let routes = handle.list_routes(None).await;
+        assert!(routes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn remove_nonexistent_route_fails() {
+        let handle = spawn_route_test_orchestrator();
+        let result = handle.remove_route("nonexistent.example.com".into()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn list_routes_filter_by_project() {
+        let handle = spawn_route_test_orchestrator();
+        handle.add_route("a.example.com".into(), "proj-a".into(), "api".into(), "none".into()).await.unwrap();
+        handle.add_route("b.example.com".into(), "proj-b".into(), "web".into(), "auto".into()).await.unwrap();
+
+        let proj_a = handle.list_routes(Some("proj-a".into())).await;
+        assert_eq!(proj_a.len(), 1);
+        assert_eq!(proj_a[0].domain, "a.example.com");
+    }
+
+    #[tokio::test]
+    async fn add_duplicate_route_fails() {
+        let handle = spawn_route_test_orchestrator();
+        handle.add_route("api.example.com".into(), "p".into(), "d".into(), "none".into()).await.unwrap();
+        let result = handle.add_route("api.example.com".into(), "p".into(), "d".into(), "none".into()).await;
+        assert!(result.is_err());
     }
 }
