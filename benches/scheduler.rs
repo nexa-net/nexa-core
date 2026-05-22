@@ -1,7 +1,5 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use nexa_core::domain::scheduler::{
-    NodeSnapshot, PodRequest, SchedulerWeights, WeightedScheduler,
-};
+use nexa_core::domain::scheduler::{NodeSnapshot, PodRequest, SchedulerWeights, WeightedScheduler};
 use uuid::Uuid;
 
 fn make_nodes(count: usize) -> Vec<NodeSnapshot> {
