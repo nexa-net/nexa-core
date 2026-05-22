@@ -53,6 +53,21 @@ pub enum NexaError {
     #[error("scheduling failed: {0}")]
     SchedulingFailed(String),
 
+    #[error("route not found: {0}")]
+    RouteNotFound(String),
+
+    #[error("route already exists: {0}")]
+    RouteAlreadyExists(String),
+
+    #[error("proxy error: {0}")]
+    Proxy(String),
+
+    #[error("certificate error: {0}")]
+    Certificate(String),
+
+    #[error("network error: {0}")]
+    Network(String),
+
     #[error("dns error: {0}")]
     Dns(String),
 }
