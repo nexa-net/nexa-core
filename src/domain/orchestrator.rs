@@ -12,6 +12,7 @@ use crate::error::{NexaError, Result};
 use crate::ports::cluster::ClusterTransport;
 use crate::ports::runtime::{ContainerConfig, ContainerRuntime, LogStream};
 use crate::ports::secrets::SecretStore;
+use crate::ports::dns::DnsProvider;
 use crate::ports::state::StateStore;
 use crate::ports::runtime::ContainerState;
 
@@ -298,6 +299,8 @@ pub struct Orchestrator {
     deployments: StdHashMap<Uuid, Deployment>,
     pods: StdHashMap<Uuid, Pod>,
     restart_states: StdHashMap<Uuid, RestartState>,
+    dns: Option<Arc<dyn DnsProvider>>,
+    master_ip: Option<String>,
     tx: mpsc::Sender<Command>,
 }
 
@@ -307,6 +310,8 @@ impl Orchestrator {
         state_store: Option<Arc<dyn StateStore>>,
         secret_store: Option<Arc<dyn SecretStore>>,
         transport: Option<Arc<dyn ClusterTransport>>,
+        dns: Option<Arc<dyn DnsProvider>>,
+        master_ip: Option<String>,
     ) -> OrchestratorHandle {
         let (tx, rx) = mpsc::channel(256);
         let tx_clone = tx.clone();
@@ -323,6 +328,8 @@ impl Orchestrator {
                 deployments: StdHashMap::new(),
                 pods: StdHashMap::new(),
                 restart_states: StdHashMap::new(),
+                dns,
+                master_ip,
                 tx: tx_clone,
             };
             orch.run(rx).await;
@@ -588,6 +595,13 @@ impl Orchestrator {
         for pod_id in &pod_ids {
             self.health_tracker.unregister(pod_id);
             if let Some(pod) = self.pods.get(pod_id) {
+                if let Some(dns) = &self.dns {
+                    if let Some(ref ip_str) = pod.container_ip {
+                        if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+                            let _ = dns.deregister(&pod.project, &pod.deployment_name, ip).await;
+                        }
+                    }
+                }
                 if let Some(cid) = &pod.container_id {
                     let _ = self.runtime.stop_container(cid, 10).await;
                     let _ = self.runtime.remove_container(cid, true).await;
@@ -673,6 +687,13 @@ impl Orchestrator {
             for &pod_id in &current_pods[(desired as usize)..] {
                 self.health_tracker.unregister(&pod_id);
                 if let Some(pod) = self.pods.get(&pod_id) {
+                    if let Some(dns) = &self.dns {
+                        if let Some(ref ip_str) = pod.container_ip {
+                            if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+                                let _ = dns.deregister(&pod.project, &pod.deployment_name, ip).await;
+                            }
+                        }
+                    }
                     if let Some(cid) = &pod.container_id {
                         let _ = self.runtime.stop_container(cid, 10).await;
                         let _ = self.runtime.remove_container(cid, true).await;
@@ -723,6 +744,14 @@ impl Orchestrator {
         labels.insert("nexa.deployment".to_string(), spec.deployment.name.clone());
         labels.insert("nexa.pod-id".to_string(), pod_id.to_string());
 
+        let (dns_servers, dns_search_domains) = match &self.master_ip {
+            Some(ip) => (
+                vec![ip.clone()],
+                vec![format!("{}.internal", spec.project)],
+            ),
+            None => (vec![], vec![]),
+        };
+
         ContainerConfig {
             name: container_name.to_string(),
             image: spec.image.clone(),
@@ -735,8 +764,8 @@ impl Orchestrator {
             }).collect(),
             labels,
             network: Some(network_name.to_string()),
-            dns: vec![],
-            dns_search: vec![],
+            dns: dns_servers,
+            dns_search: dns_search_domains,
         }
     }
 
@@ -846,7 +875,14 @@ impl Orchestrator {
                     pod.status = PodStatus::Running;
 
                     match self.runtime.container_ip(&container_id, &network_name).await {
-                        Ok(ip) => pod.container_ip = Some(ip),
+                        Ok(ip) => {
+                            pod.container_ip = Some(ip.clone());
+                            if let Some(dns) = &self.dns {
+                                if let Ok(parsed_ip) = ip.parse::<std::net::IpAddr>() {
+                                    let _ = dns.register(&spec.project, &spec.deployment.name, parsed_ip).await;
+                                }
+                            }
+                        }
                         Err(e) => tracing::warn!(error = %e, "failed to get container IP"),
                     }
                 }
@@ -1229,6 +1265,13 @@ impl Orchestrator {
             for pod_id in &pod_ids {
                 self.health_tracker.unregister(pod_id);
                 if let Some(pod) = self.pods.get(pod_id) {
+                    if let Some(dns) = &self.dns {
+                        if let Some(ref ip_str) = pod.container_ip {
+                            if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+                                let _ = dns.deregister(&pod.project, &pod.deployment_name, ip).await;
+                            }
+                        }
+                    }
                     if let Some(cid) = &pod.container_id {
                         let _ = self.runtime.stop_container(cid, 10).await;
                         let _ = self.runtime.remove_container(cid, true).await;
@@ -1468,12 +1511,12 @@ mod tests {
     }
 
     fn spawn_test_orchestrator() -> OrchestratorHandle {
-        Orchestrator::spawn(Arc::new(MockRuntime), None, None, None)
+        Orchestrator::spawn(Arc::new(MockRuntime), None, None, None, None, None)
     }
 
     fn spawn_persisted_test_orchestrator() -> (OrchestratorHandle, Arc<InMemoryStore>) {
         let store = Arc::new(InMemoryStore::new());
-        let handle = Orchestrator::spawn(Arc::new(MockRuntime), Some(store.clone() as Arc<dyn StateStore>), None, None);
+        let handle = Orchestrator::spawn(Arc::new(MockRuntime), Some(store.clone() as Arc<dyn StateStore>), None, None, None, None);
         (handle, store)
     }
 
@@ -1654,7 +1697,7 @@ mod tests {
         let runtime = Arc::new(CapturingRuntime {
             configs: Mutex::new(Vec::new()),
         });
-        let handle = Orchestrator::spawn(runtime.clone(), None, None, None);
+        let handle = Orchestrator::spawn(runtime.clone(), None, None, None, None, None);
 
         let spec = DeploymentSpec {
             project: "test".into(),
@@ -1816,7 +1859,7 @@ mod tests {
         pod.container_id = Some("old-container-123".into());
         store.insert_pod(&pod).await.unwrap();
 
-        let handle = Orchestrator::spawn(Arc::new(MockRuntime), Some(store.clone() as Arc<dyn StateStore>), None, None);
+        let handle = Orchestrator::spawn(Arc::new(MockRuntime), Some(store.clone() as Arc<dyn StateStore>), None, None, None, None);
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         let projects = handle.list_projects().await;
@@ -1984,7 +2027,7 @@ mod tests {
 
         // ConfigurableMockRuntime has no knowledge of "vanished-container"
         let runtime = Arc::new(ConfigurableMockRuntime::new());
-        let handle = Orchestrator::spawn(runtime, Some(store.clone() as Arc<dyn StateStore>), None, None);
+        let handle = Orchestrator::spawn(runtime, Some(store.clone() as Arc<dyn StateStore>), None, None, None, None);
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         let pods = handle.list_pods(None).await;
@@ -2341,6 +2384,8 @@ mod tests {
             None,
             Some(secrets as Arc<dyn SecretStore>),
             None,
+            None,
+            None,
         );
 
         let spec = DeploymentSpec {
@@ -2376,6 +2421,8 @@ mod tests {
             Arc::new(MockRuntime),
             None,
             Some(secrets as Arc<dyn SecretStore>),
+            None,
+            None,
             None,
         );
 
@@ -2439,5 +2486,138 @@ mod tests {
 
         let config = handle.get_scheduler_config().await;
         assert_eq!(config.weights, SchedulerWeights::binpack());
+    }
+
+    // --- DNS integration tests ---
+
+    struct SpyDnsProvider {
+        registered: StdMutex<Vec<(String, String, std::net::IpAddr)>>,
+        deregistered: StdMutex<Vec<(String, String, std::net::IpAddr)>>,
+    }
+
+    impl SpyDnsProvider {
+        fn new() -> Self {
+            Self {
+                registered: StdMutex::new(vec![]),
+                deregistered: StdMutex::new(vec![]),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DnsProvider for SpyDnsProvider {
+        async fn register(&self, project: &str, deployment: &str, ip: std::net::IpAddr) -> Result<()> {
+            self.registered.lock().unwrap().push((project.to_string(), deployment.to_string(), ip));
+            Ok(())
+        }
+        async fn deregister(&self, project: &str, deployment: &str, ip: std::net::IpAddr) -> Result<()> {
+            self.deregistered.lock().unwrap().push((project.to_string(), deployment.to_string(), ip));
+            Ok(())
+        }
+        async fn lookup(&self, _project: &str, _deployment: &str) -> Result<Vec<std::net::IpAddr>> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn deploy_registers_dns_for_pods() {
+        let dns = Arc::new(SpyDnsProvider::new());
+        let handle = Orchestrator::spawn(
+            Arc::new(MockRuntime),
+            None,
+            None,
+            None,
+            Some(dns.clone() as Arc<dyn DnsProvider>),
+            None,
+        );
+
+        let spec = DeploymentSpec {
+            project: "ecommerce".into(),
+            deployment: DeploymentMeta { name: "api".into() },
+            replicas: 2,
+            image: "nginx:latest".into(),
+            ports: vec![],
+            env: HashMap::new(),
+            volumes: vec![],
+            network: None,
+            healthcheck: None,
+            restart: RestartPolicy::default(),
+            resources: None,
+            secrets: vec![],
+        };
+
+        handle.deploy(spec).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let registered = dns.registered.lock().unwrap();
+        assert_eq!(registered.len(), 2, "should register DNS for each pod");
+        assert!(registered.iter().all(|(p, d, _)| p == "ecommerce" && d == "api"));
+    }
+
+    #[tokio::test]
+    async fn stop_deregisters_dns_for_pods() {
+        let dns = Arc::new(SpyDnsProvider::new());
+        let handle = Orchestrator::spawn(
+            Arc::new(MockRuntime),
+            None,
+            None,
+            None,
+            Some(dns.clone() as Arc<dyn DnsProvider>),
+            None,
+        );
+
+        let spec = DeploymentSpec {
+            project: "ecommerce".into(),
+            deployment: DeploymentMeta { name: "api".into() },
+            replicas: 1,
+            image: "nginx:latest".into(),
+            ports: vec![],
+            env: HashMap::new(),
+            volumes: vec![],
+            network: None,
+            healthcheck: None,
+            restart: RestartPolicy::default(),
+            resources: None,
+            secrets: vec![],
+        };
+
+        handle.deploy(spec).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        handle.stop("ecommerce".into(), "api".into()).await.unwrap();
+
+        let deregistered = dns.deregistered.lock().unwrap();
+        assert_eq!(deregistered.len(), 1, "should deregister DNS on stop");
+        assert_eq!(deregistered[0].0, "ecommerce");
+        assert_eq!(deregistered[0].1, "api");
+    }
+
+    #[tokio::test]
+    async fn containers_receive_dns_config_when_master_ip_set() {
+        let handle = Orchestrator::spawn(
+            Arc::new(MockRuntime),
+            None,
+            None,
+            None,
+            None,
+            Some("10.0.0.100".into()),
+        );
+
+        let spec = DeploymentSpec {
+            project: "ecommerce".into(),
+            deployment: DeploymentMeta { name: "api".into() },
+            replicas: 1,
+            image: "nginx".into(),
+            ports: vec![],
+            env: HashMap::new(),
+            volumes: vec![],
+            network: None,
+            healthcheck: None,
+            restart: RestartPolicy::default(),
+            resources: None,
+            secrets: vec![],
+        };
+
+        let deployment = handle.deploy(spec).await.unwrap();
+        assert_eq!(deployment.name(), "api");
     }
 }
