@@ -2396,4 +2396,46 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("nonexistent"));
     }
+
+    #[tokio::test]
+    async fn single_node_scheduler_deploys_successfully() {
+        let handle = spawn_test_orchestrator();
+
+        let spec = DeploymentSpec {
+            project: "test".into(),
+            deployment: DeploymentMeta { name: "web".into() },
+            replicas: 3,
+            image: "nginx".into(),
+            ports: vec![],
+            env: HashMap::new(),
+            volumes: vec![],
+            network: None,
+            healthcheck: None,
+            restart: RestartPolicy::default(),
+            resources: None,
+            secrets: vec![],
+        };
+
+        handle.deploy(spec).await.unwrap();
+        let pods = handle.list_pods(None).await;
+        assert_eq!(pods.len(), 3);
+        assert!(pods.iter().all(|p| p.status == PodStatus::Running));
+    }
+
+    #[tokio::test]
+    async fn scheduler_config_can_be_changed_at_runtime() {
+        use crate::domain::scheduler::SchedulerConfig;
+
+        let handle = spawn_test_orchestrator();
+
+        let config = handle.get_scheduler_config().await;
+        assert_eq!(config.strategy, "spread");
+
+        let binpack = SchedulerConfig::from_strategy("binpack").unwrap();
+        let updated = handle.set_scheduler_config(binpack).await.unwrap();
+        assert_eq!(updated.strategy, "binpack");
+
+        let config = handle.get_scheduler_config().await;
+        assert_eq!(config.weights, SchedulerWeights::binpack());
+    }
 }
