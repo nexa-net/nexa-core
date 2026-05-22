@@ -125,6 +125,22 @@ impl WeightedScheduler {
     }
 }
 
+pub fn parse_memory(s: &str) -> u64 {
+    let s = s.trim();
+    if s.is_empty() {
+        return 0;
+    }
+    if let Some(val) = s.strip_suffix("Gi") {
+        val.parse::<f64>().unwrap_or(0.0) as u64 * 1_073_741_824
+    } else if let Some(val) = s.strip_suffix("Mi") {
+        val.parse::<f64>().unwrap_or(0.0) as u64 * 1_048_576
+    } else if let Some(val) = s.strip_suffix("Ki") {
+        val.parse::<f64>().unwrap_or(0.0) as u64 * 1024
+    } else {
+        s.parse::<u64>().unwrap_or(0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,5 +455,27 @@ mod tests {
         let binpack_pick = binpack.select_node(&req, &nodes).unwrap();
         assert_eq!(spread_pick, idle_id, "spread should pick idle");
         assert_eq!(binpack_pick, busy_id, "binpack should pick busy");
+    }
+
+    // ── Task 6 tests: parse_memory ──
+
+    #[test]
+    fn parse_memory_gi() {
+        assert_eq!(parse_memory("2Gi"), 2 * 1_073_741_824);
+    }
+
+    #[test]
+    fn parse_memory_mi() {
+        assert_eq!(parse_memory("512Mi"), 512 * 1_048_576);
+    }
+
+    #[test]
+    fn parse_memory_empty() {
+        assert_eq!(parse_memory(""), 0);
+    }
+
+    #[test]
+    fn parse_memory_bytes() {
+        assert_eq!(parse_memory("1048576"), 1_048_576);
     }
 }

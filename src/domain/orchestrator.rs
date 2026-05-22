@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::domain::models::*;
 use crate::domain::health::{HealthTracker, HealthState, PodHealthConfig};
 use crate::domain::restart::{self, RestartState};
+use crate::domain::scheduler::{NodeSnapshot, PodRequest, SchedulerWeights, WeightedScheduler, parse_memory};
 use crate::error::{NexaError, Result};
 use crate::ports::cluster::ClusterTransport;
 use crate::ports::runtime::{ContainerConfig, ContainerRuntime, LogStream};
@@ -267,6 +268,7 @@ pub struct Orchestrator {
     state_store: Option<Arc<dyn StateStore>>,
     secret_store: Option<Arc<dyn SecretStore>>,
     transport: Option<Arc<dyn ClusterTransport>>,
+    scheduler: WeightedScheduler,
     health_tracker: HealthTracker,
     projects: StdHashMap<String, Project>,
     deployments: StdHashMap<Uuid, Deployment>,
@@ -290,6 +292,7 @@ impl Orchestrator {
                 state_store,
                 secret_store,
                 transport,
+                scheduler: WeightedScheduler::new(SchedulerWeights::default()),
                 health_tracker: HealthTracker::new(),
                 projects: StdHashMap::new(),
                 deployments: StdHashMap::new(),
@@ -720,22 +723,35 @@ impl Orchestrator {
         Ok(resolved)
     }
 
-    async fn select_node(&self) -> Option<Uuid> {
+    async fn select_node(&self, spec: &DeploymentSpec) -> Option<Uuid> {
         let state = self.state_store.as_ref()?;
         let nodes = state.list_nodes().await.ok()?;
-        // Skip if no nodes or only master node registered — this is single-node mode
-        let workers: Vec<&Node> = nodes
+
+        let snapshots: Vec<NodeSnapshot> = nodes
             .iter()
             .filter(|n| n.status == NodeStatus::Ready && n.role == NodeRole::Worker)
+            .map(|n| NodeSnapshot {
+                node_id: n.id,
+                cpu_available: n.resources.cpu_available,
+                cpu_total: n.resources.cpu_cores,
+                memory_available: n.resources.memory_available,
+                memory_total: n.resources.memory_bytes,
+                running_pods: n.resources.running_pods,
+                max_pods: 110,
+                recent_failures: vec![],
+            })
             .collect();
-        if workers.is_empty() {
+
+        if snapshots.is_empty() {
             return None;
         }
-        // Simple strategy: pick the ready worker with the most available memory
-        workers
-            .iter()
-            .max_by_key(|n| n.resources.memory_available)
-            .map(|n| n.id)
+
+        let pod_request = PodRequest {
+            cpu_request: spec.resources.as_ref().map(|r| r.cpu).unwrap_or(0.0),
+            memory_request: spec.resources.as_ref().map(|r| parse_memory(&r.memory)).unwrap_or(0),
+        };
+
+        self.scheduler.select_node(&pod_request, &snapshots).ok()
     }
 
     async fn create_pod(&mut self, deployment_id: Uuid, spec: &DeploymentSpec, index: u32) -> Result<()> {
@@ -760,7 +776,7 @@ impl Orchestrator {
         }
 
         // Try to schedule on a remote node if transport is available
-        let target_node = self.select_node().await;
+        let target_node = self.select_node(spec).await;
 
         if let (Some(transport), Some(node_id)) = (&self.transport, target_node) {
             // Multi-node path: delegate to transport
