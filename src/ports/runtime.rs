@@ -16,6 +16,8 @@ pub struct ContainerConfig {
     pub volumes: Vec<VolumeBinding>,
     pub labels: HashMap<String, String>,
     pub network: Option<String>,
+    pub dns: Vec<String>,
+    pub dns_search: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,5 +94,22 @@ mod tests {
         let _ = format!("{died:?}");
         let _ = format!("{started:?}");
         let _ = format!("{oom:?}");
+    }
+
+    #[test]
+    fn container_config_dns_fields_default_to_empty() {
+        let config = ContainerConfig {
+            name: "test".into(),
+            image: "nginx".into(),
+            env: HashMap::new(),
+            ports: vec![],
+            volumes: vec![],
+            labels: HashMap::new(),
+            network: None,
+            dns: vec![],
+            dns_search: vec![],
+        };
+        assert!(config.dns.is_empty());
+        assert!(config.dns_search.is_empty());
     }
 }

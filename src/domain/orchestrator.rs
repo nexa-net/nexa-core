@@ -735,6 +735,8 @@ impl Orchestrator {
             }).collect(),
             labels,
             network: Some(network_name.to_string()),
+            dns: vec![],
+            dns_search: vec![],
         }
     }
 
