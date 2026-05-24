@@ -16,6 +16,7 @@ use crate::ports::dns::DnsProvider;
 use crate::ports::proxy::{
     ProxyBackend, RouteConfig, TlsConfig as ProxyTlsConfig, Upstream as ProxyUpstream,
 };
+use crate::ports::metrics::MetricsPort;
 use crate::ports::route_store::RouteStore;
 use crate::ports::runtime::ContainerState;
 use crate::ports::runtime::{ContainerConfig, ContainerRuntime, LogStream};
@@ -403,6 +404,7 @@ pub struct Orchestrator {
     master_ip: Option<String>,
     proxy: Option<Arc<dyn ProxyBackend>>,
     route_store: Option<Arc<dyn RouteStore>>,
+    metrics: Option<Arc<dyn MetricsPort>>,
     tx: mpsc::Sender<Command>,
 }
 
@@ -416,6 +418,7 @@ impl Orchestrator {
         master_ip: Option<String>,
         proxy: Option<Arc<dyn ProxyBackend>>,
         route_store: Option<Arc<dyn RouteStore>>,
+        metrics: Option<Arc<dyn MetricsPort>>,
     ) -> OrchestratorHandle {
         let (tx, rx) = mpsc::channel(256);
         let tx_clone = tx.clone();
@@ -436,6 +439,7 @@ impl Orchestrator {
                 master_ip,
                 proxy,
                 route_store,
+                metrics,
                 tx: tx_clone,
             };
             orch.run(rx).await;
@@ -571,6 +575,13 @@ impl Orchestrator {
                     let _ = reply.send(routes);
                 }
             }
+        }
+    }
+
+    fn update_gauge_counts(&self) {
+        if let Some(ref m) = self.metrics {
+            m.set_pod_count(self.pods.len());
+            m.set_deployment_count(self.deployments.len());
         }
     }
 
@@ -723,6 +734,10 @@ impl Orchestrator {
             self.persist_update_deployment(&cloned).await;
             let id = cloned.id;
             self.reconcile_deployment(id).await?;
+            if let Some(ref m) = self.metrics {
+                m.record_deployment_op("deploy");
+            }
+            self.update_gauge_counts();
             return Ok(self.deployments[&id].clone());
         }
 
@@ -731,6 +746,10 @@ impl Orchestrator {
         self.persist_insert_deployment(&deployment).await;
         self.deployments.insert(id, deployment);
         self.reconcile_deployment(id).await?;
+        if let Some(ref m) = self.metrics {
+            m.record_deployment_op("deploy");
+        }
+        self.update_gauge_counts();
         Ok(self.deployments[&id].clone())
     }
 
@@ -794,6 +813,10 @@ impl Orchestrator {
             self.persist_update_deployment(&cloned).await;
         }
 
+        if let Some(ref m) = self.metrics {
+            m.record_deployment_op("stop");
+        }
+        self.update_gauge_counts();
         Ok(())
     }
 
@@ -806,6 +829,10 @@ impl Orchestrator {
             let _ = store.delete_deployment(&id).await;
         }
         self.deployments.remove(&id);
+        if let Some(ref m) = self.metrics {
+            m.record_deployment_op("remove");
+        }
+        self.update_gauge_counts();
         Ok(())
     }
 
@@ -825,6 +852,10 @@ impl Orchestrator {
         }
 
         self.reconcile_deployment(deployment_id).await?;
+        if let Some(ref m) = self.metrics {
+            m.record_deployment_op("scale");
+        }
+        self.update_gauge_counts();
         Ok(self.deployments[&deployment_id].clone())
     }
 
@@ -1024,7 +1055,12 @@ impl Orchestrator {
                 .unwrap_or(0),
         };
 
-        self.scheduler.select_node(&pod_request, &snapshots).ok()
+        let start = std::time::Instant::now();
+        let result = self.scheduler.select_node(&pod_request, &snapshots).ok();
+        if let Some(ref m) = self.metrics {
+            m.record_schedule_decision(&self.scheduler_strategy, start.elapsed().as_secs_f64());
+        }
+        result
     }
 
     async fn create_pod(
@@ -1208,6 +1244,10 @@ impl Orchestrator {
             None => return,
         };
         let deployment_id = pod.deployment_id;
+
+        if let Some(ref m) = self.metrics {
+            m.record_container_event("died");
+        }
 
         // Find deployment's restart policy
         let policy = match self.deployments.get(&deployment_id) {
@@ -1914,6 +1954,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -1922,6 +1963,7 @@ mod tests {
         let handle = Orchestrator::spawn(
             Arc::new(MockRuntime),
             Some(store.clone() as Arc<dyn StateStore>),
+            None,
             None,
             None,
             None,
@@ -2130,7 +2172,7 @@ mod tests {
         let runtime = Arc::new(CapturingRuntime {
             configs: Mutex::new(Vec::new()),
         });
-        let handle = Orchestrator::spawn(runtime.clone(), None, None, None, None, None, None, None);
+        let handle = Orchestrator::spawn(runtime.clone(), None, None, None, None, None, None, None, None);
 
         let spec = DeploymentSpec {
             project: "test".into(),
@@ -2295,6 +2337,7 @@ mod tests {
         let handle = Orchestrator::spawn(
             Arc::new(MockRuntime),
             Some(store.clone() as Arc<dyn StateStore>),
+            None,
             None,
             None,
             None,
@@ -2472,6 +2515,7 @@ mod tests {
         let handle = Orchestrator::spawn(
             runtime,
             Some(store.clone() as Arc<dyn StateStore>),
+            None,
             None,
             None,
             None,
@@ -2874,6 +2918,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         let spec = DeploymentSpec {
@@ -2909,6 +2954,7 @@ mod tests {
             Arc::new(MockRuntime),
             None,
             Some(secrets as Arc<dyn SecretStore>),
+            None,
             None,
             None,
             None,
@@ -3038,6 +3084,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         let spec = DeploymentSpec {
@@ -3079,6 +3126,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         let spec = DeploymentSpec {
@@ -3115,6 +3163,7 @@ mod tests {
             None,
             None,
             Some("10.0.0.100".into()),
+            None,
             None,
             None,
         );
@@ -3174,6 +3223,7 @@ mod tests {
             None,
             Some(proxy),
             Some(route_store),
+            None,
         )
     }
 
