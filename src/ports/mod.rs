@@ -1,5 +1,6 @@
 pub mod cluster;
 pub mod dns;
+pub mod metrics;
 pub mod proxy;
 pub mod route_store;
 pub mod route_store_memory;
@@ -8,4 +9,3 @@ pub mod secrets;
 pub mod secrets_memory;
 pub mod state;
 pub mod state_memory;
-pub mod metrics;

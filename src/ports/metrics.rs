@@ -25,7 +25,9 @@ impl MetricsPort for NoOpMetrics {
     fn set_deployment_count(&self, _count: usize) {}
     fn record_proxy_request(&self, _domain: &str, _status: u16, _duration_secs: f64) {}
     fn record_proxy_error(&self, _domain: &str, _error_type: &str) {}
-    fn as_any(&self) -> &dyn Any { self }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 #[cfg(test)]

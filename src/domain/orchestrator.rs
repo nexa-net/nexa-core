@@ -13,10 +13,10 @@ use crate::domain::scheduler::{
 use crate::error::{NexaError, Result};
 use crate::ports::cluster::ClusterTransport;
 use crate::ports::dns::DnsProvider;
+use crate::ports::metrics::MetricsPort;
 use crate::ports::proxy::{
     ProxyBackend, RouteConfig, TlsConfig as ProxyTlsConfig, Upstream as ProxyUpstream,
 };
-use crate::ports::metrics::MetricsPort;
 use crate::ports::route_store::RouteStore;
 use crate::ports::runtime::ContainerState;
 use crate::ports::runtime::{ContainerConfig, ContainerRuntime, LogStream};
@@ -2172,7 +2172,17 @@ mod tests {
         let runtime = Arc::new(CapturingRuntime {
             configs: Mutex::new(Vec::new()),
         });
-        let handle = Orchestrator::spawn(runtime.clone(), None, None, None, None, None, None, None, None);
+        let handle = Orchestrator::spawn(
+            runtime.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
 
         let spec = DeploymentSpec {
             project: "test".into(),
