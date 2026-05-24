@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779487624092,
+  "lastUpdate": 1779614283204,
   "repoUrl": "https://github.com/nexa-net/nexa-core",
   "entries": {
     "Benchmark": [
@@ -119,6 +119,66 @@ window.BENCHMARK_DATA = {
             "name": "scheduler_binpack/20",
             "value": 951,
             "range": "± 11",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "nassime.abdiou@icloud.com",
+            "name": "Nassime Abdiou",
+            "username": "na2sime"
+          },
+          "committer": {
+            "email": "nassime.abdiou@icloud.com",
+            "name": "Nassime Abdiou",
+            "username": "na2sime"
+          },
+          "distinct": true,
+          "id": "0a9c4e2ad06173bacbd180653c969f5cc65aa4d0",
+          "message": "feat: add MetricsPort to Orchestrator with handler instrumentation\n\nAdds an optional MetricsPort field (9th parameter) to Orchestrator::spawn,\ninstruments handle_deploy, handle_scale, handle_stop, handle_remove_deployment,\nhandle_container_exited, and select_node with deployment op, container event,\nand schedule decision metrics; also adds update_gauge_counts helper.",
+          "timestamp": "2026-05-24T10:57:03+02:00",
+          "tree_id": "2d0eeffb56975e18da5105149b7076f6bacc4a01",
+          "url": "https://github.com/nexa-net/nexa-core/commit/0a9c4e2ad06173bacbd180653c969f5cc65aa4d0"
+        },
+        "date": 1779614282773,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "parse_minimal_spec",
+            "value": 29150,
+            "range": "± 144",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "parse_full_spec",
+            "value": 66284,
+            "range": "± 6204",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "scheduler_spread/5",
+            "value": 342,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "scheduler_spread/20",
+            "value": 1337,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "scheduler_binpack/5",
+            "value": 340,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "scheduler_binpack/20",
+            "value": 1340,
+            "range": "± 4",
             "unit": "ns/iter"
           }
         ]
